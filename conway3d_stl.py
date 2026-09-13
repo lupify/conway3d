@@ -97,15 +97,15 @@ def load_building_blocks(model_stl_dir="./model_stls/version3"):
             "base": cellbasestl, "cell": cellstl}
 
 
-def build_model(grid_record, blocks, unit=10, verbose=False):
-    """Place a part mesh for every cell and every cell-to-cell link.
+def plan_structure(grid_record, verbose=False):
+    """Work out where every cell and rung goes, without building any geometry.
 
-    Returns a dict with the placed meshes, the (x, y, t) of every live cell and
-    the list of links between them.
+    Returns the (x, y, t) of every live cell and, for each link, the two cells
+    it joins plus which rung part reaches between them.
     """
-    meshes = []
     cells = []
     connection_lines = []
+    rungs = []
 
     grid_rp = np.pad(grid_record, ((0, 0), (1, 1), (1, 1)))  # grid record with padding
     grid_rp = grid_rp[:, ::-1, :]  # flipped, so when printed, the original pattern is seen from below
@@ -119,44 +119,52 @@ def build_model(grid_record, blocks, unit=10, verbose=False):
 
                 cells.append((x, y, t))
 
-                m = mesh.Mesh(np.copy(blocks["cell"].data))  # mesh for each live cell
-                m.x += x * unit
-                m.y += y * unit
-                m.z += t * unit
-                meshes.append(mesh.Mesh(np.copy(m.data)))
-
-                if t == 0:  # adding the base for printing
-                    m = mesh.Mesh(np.copy(blocks["base"].data))
-                    m.x += x * unit
-                    m.y += y * unit
-                    meshes.append(mesh.Mesh(np.copy(m.data)))
-
                 if t < grid_rp.shape[0] - 1:
                     for [dx, dy] in REGION_CHECK:
                         if grid_rp[t + 1, x + dx, y + dy] != 1:
                             continue
-
-                        if (dx + dy) % 2 == 1:
-                            kind = "adj"
-                            m = mesh.Mesh(np.copy(blocks["rung_adj"].data))
-                        else:
-                            kind = "crn"
-                            m = mesh.Mesh(np.copy(blocks["rung_crn"].data))
+                        # an orthogonal step needs the short rung, a diagonal
+                        # step the long one
+                        kind = "rung_adj" if (dx + dy) % 2 == 1 else "rung_crn"
                         if verbose:
                             print(f"{im} (t, x, y) : {(t, x, y)} to "
-                                  f"{(t + 1, x + dx, y + dy)}, {kind}")
-
-                        m.rotate([0, 0, 1], -arctan2(dy, dx))  # rotation around z axis
-                        m.x += x * unit  # translation of x and y coordinates
-                        m.y += y * unit
-                        m.z += t * unit
-                        meshes.append(mesh.Mesh(np.copy(m.data)))
-
+                                  f"{(t + 1, x + dx, y + dy)}, "
+                                  f"{'adj' if kind == 'rung_adj' else 'crn'}")
+                        rungs.append((x, y, t, dx, dy, kind))
                         connection_lines.append([[x, y, t], [x + dx, y + dy, t + 1]])
                         im += 1
 
-    return {"meshes": meshes, "cells": cells,
-            "connection_lines": connection_lines, "unit": unit}
+    return {"cells": cells, "rungs": rungs, "connection_lines": connection_lines}
+
+
+def build_model(grid_record, blocks, unit=10, verbose=False):
+    """Place a part mesh for every cell and every cell-to-cell link."""
+    plan = plan_structure(grid_record, verbose=verbose)
+    meshes = []
+
+    for (x, y, t) in plan["cells"]:
+        m = mesh.Mesh(np.copy(blocks["cell"].data))  # mesh for each live cell
+        m.x += x * unit
+        m.y += y * unit
+        m.z += t * unit
+        meshes.append(mesh.Mesh(np.copy(m.data)))
+
+        if t == 0:  # adding the base for printing
+            m = mesh.Mesh(np.copy(blocks["base"].data))
+            m.x += x * unit
+            m.y += y * unit
+            meshes.append(mesh.Mesh(np.copy(m.data)))
+
+    for (x, y, t, dx, dy, kind) in plan["rungs"]:
+        m = mesh.Mesh(np.copy(blocks[kind].data))
+        m.rotate([0, 0, 1], -arctan2(dy, dx))  # rotation around z axis
+        m.x += x * unit  # translation of x and y coordinates
+        m.y += y * unit
+        m.z += t * unit
+        meshes.append(mesh.Mesh(np.copy(m.data)))
+
+    return {"meshes": meshes, "cells": plan["cells"],
+            "connection_lines": plan["connection_lines"], "unit": unit}
 
 
 def check_connectivity(model):
@@ -199,6 +207,60 @@ def save_stl(meshes, path, ascii_mode=True):
     combined = mesh.Mesh(np.concatenate([m.data for m in meshes]))
     combined.save(path, mode=stl.Mode.ASCII if ascii_mode else stl.Mode.BINARY)
     return combined
+
+
+# ------------------------------------------------------------- circular base
+
+def cylinder_mesh(cx, cy, z0, z1, radius, segments=180):
+    """A closed cylinder, used as the stabilising base plate."""
+    ang = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+    x = cx + radius * np.cos(ang)
+    y = cy + radius * np.sin(ang)
+
+    tris = []
+    for i in range(segments):
+        j = (i + 1) % segments
+        p0, p1 = [x[i], y[i], z0], [x[j], y[j], z0]
+        q0, q1 = [x[i], y[i], z1], [x[j], y[j], z1]
+        tris.append([[cx, cy, z0], p1, p0])          # bottom fan, faces -z
+        tris.append([[cx, cy, z1], q0, q1])          # top fan, faces +z
+        tris.append([p0, p1, q1])                    # side
+        tris.append([p0, q1, q0])
+
+    data = np.zeros(len(tris), dtype=mesh.Mesh.dtype)
+    data["vectors"] = np.array(tris)
+    m = mesh.Mesh(data)
+    m.update_normals()
+    return m
+
+
+def base_footprint(model, blocks):
+    """Centre and radius of the smallest disc covering the whole model in xy.
+
+    A tree-shaped model is top heavy, so the plate is sized to the canopy
+    rather than to the few cells that touch the plate.
+    """
+    unit = model["unit"]
+    pts = np.array([[x * unit, y * unit] for x, y, _ in model["cells"]])
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    centre = (lo + hi) / 2
+    cell_r = float(np.abs(blocks["cell"].points.reshape(-1, 3)[:, :2]).max())
+    radius = float(np.linalg.norm(pts - centre, axis=1).max()) + cell_r
+    return centre[0], centre[1], radius
+
+
+def make_circular_base(model, blocks, radius=None, thickness=3.0, segments=180,
+                       margin=2.0):
+    """Build the plate and return (mesh, centre_x, centre_y, radius).
+
+    It spans from the underside of the per-cell bases upwards, so it fuses
+    with every cell that touches the plate.
+    """
+    cx, cy, auto_r = base_footprint(model, blocks)
+    if radius is None:
+        radius = auto_r + margin
+    z0 = float(blocks["base"].points.reshape(-1, 3)[:, 2].min())  # -4mm, the plate
+    return cylinder_mesh(cx, cy, z0, z0 + thickness, radius, segments), cx, cy, radius
 
 
 # ----------------------------------------------------------------- diagnostics
@@ -271,6 +333,16 @@ def main(argv=None):
                    help="lattice spacing in mm, must match the part STLs")
     p.add_argument("--binary", action="store_true",
                    help="write a binary STL instead of ASCII")
+    p.add_argument("--center", action="store_true",
+                   help="move the model over the origin, ready to slice")
+    p.add_argument("--circular-base", action="store_true",
+                   help="add a round plate under the model so it cannot tip")
+    p.add_argument("--base-radius", type=float, default=None,
+                   help="plate radius in mm (default: cover the whole model)")
+    p.add_argument("--base-thickness", type=float, default=3.0,
+                   help="plate thickness in mm")
+    p.add_argument("--base-segments", type=int, default=180,
+                   help="facets around the plate")
     p.add_argument("--pad", type=int, default=0,
                    help="pad the initial grid with this many dead cells")
     p.add_argument("--plot", action="store_true", help="show the diagnostic plots")
@@ -293,13 +365,33 @@ def main(argv=None):
     model = build_model(grid_record, blocks, unit=args.unit, verbose=args.verbose)
 
     conn = check_connectivity(model)
-    combined = save_stl(model["meshes"], args.out, ascii_mode=not args.binary)
+
+    out_meshes = list(model["meshes"])
+    plate = None
+    if args.circular_base:
+        plate, bx, by, br = make_circular_base(
+            model, blocks, radius=args.base_radius,
+            thickness=args.base_thickness, segments=args.base_segments)
+        out_meshes.append(plate)
+
+    if args.center:
+        pts = np.concatenate([m.points.reshape(-1, 3) for m in out_meshes])
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        shift = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, 0.0])
+        for m in out_meshes:
+            m.x -= shift[0]
+            m.y -= shift[1]
+
+    combined = save_stl(out_meshes, args.out, ascii_mode=not args.binary)
 
     print(f"grid {grid.shape[0]}x{grid.shape[1]}, {args.frames} frames")
     print(f"live cells: {len(model['cells'])}, rungs: {len(model['connection_lines'])}")
     print(f"parts: {len(model['meshes'])}, triangles: {len(combined.data)}")
     print(f"connected pieces: {len(conn['components'])}"
           f" ({len(conn['floating'])} not reaching the base)")
+    if plate is not None:
+        print(f"circular base: radius {br:.1f}mm, {args.base_thickness}mm thick, "
+              f"centred at ({bx:.1f}, {by:.1f})")
     print(f"wrote {args.out}")
 
     if args.plot:

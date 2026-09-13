@@ -11,8 +11,10 @@ import numpy as np
 from stl import mesh
 
 import init_grids
-from conway3d_stl import (build_model, check_connectivity, life_run,
-                          load_building_blocks, load_grid_from_image, save_stl)
+from conway3d_stl import (base_footprint, build_model, check_connectivity,
+                          cylinder_mesh, life_run, load_building_blocks,
+                          load_grid_from_image, make_circular_base, plan_structure,
+                          save_stl)
 
 MODEL_DIR = "./model_stls/version3"
 UNIT = 10
@@ -251,6 +253,159 @@ def test_every_part_version_builds_a_printable_model():
                 f"{version}: rung {src}->{dst} misses its source cell")
             assert np.linalg.norm(pts - dst, axis=1).min() < cell_r, (
                 f"{version}: rung {src}->{dst} misses its destination cell")
+
+
+# -------------------------------------------------------------- circular base
+
+def test_cylinder_is_a_closed_solid_with_outward_normals():
+    m = cylinder_mesh(0, 0, -4, -1, 50, segments=180)
+    vol, cog, _ = m.get_mass_properties()
+    assert vol > 0, "normals point inward"
+    assert abs(vol - np.pi * 50 ** 2 * 3) / vol < 0.01, f"volume off: {vol}"
+    assert np.allclose(cog, [0, 0, -2.5], atol=1e-6), f"centre of gravity {cog}"
+
+    tris = m.vectors.round(4)
+    edges = {}
+    for tri in tris:
+        k = [tuple(v) for v in tri]
+        for a, b in [(0, 1), (1, 2), (2, 0)]:
+            e = tuple(sorted([k[a], k[b]]))
+            edges[e] = edges.get(e, 0) + 1
+    assert all(c == 2 for c in edges.values()), "plate is not watertight"
+
+
+def test_plate_supports_the_whole_model():
+    """The plate must catch every cell that touches it and out to the canopy."""
+    blocks = load_building_blocks(MODEL_DIR)
+    rec = life_run(init_grids.two_glider, FRAMES)
+    model = build_model(rec, blocks, unit=UNIT)
+
+    plate, cx, cy, r = make_circular_base(model, blocks, thickness=3.0)
+    unit = model["unit"]
+
+    for x, y, t in model["cells"]:
+        d = np.hypot(x * unit - cx, y * unit - cy)
+        assert d <= r, f"cell {(x, y, t)} overhangs the plate by {d - r:.1f}mm"
+
+    # it must sit on the build plate and fuse with the per-cell bases
+    pz = plate.points.reshape(-1, 3)[:, 2]
+    base_z = blocks["base"].points.reshape(-1, 3)[:, 2]
+    assert abs(pz.min() - base_z.min()) < 1e-6, "plate does not sit at z of the bases"
+    assert pz.max() > base_z.min(), "plate has no thickness"
+    assert pz.max() <= base_z.max() + 1e-9, "plate swallows the cells above it"
+
+
+def test_explicit_base_radius_is_honoured():
+    blocks = load_building_blocks(MODEL_DIR)
+    model = build_model(life_run(init_grids.two_glider, 6), blocks, unit=UNIT)
+    plate, cx, cy, r = make_circular_base(model, blocks, radius=40.0)
+    assert abs(r - 40.0) < 1e-9
+    pts = plate.points.reshape(-1, 3)
+    reach = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy).max()
+    assert abs(reach - 40.0) < 0.01, f"plate reaches {reach:.2f}, asked for 40"
+
+
+# ----------------------------------------------------------- structure vs mesh
+
+def test_plan_matches_the_placed_meshes():
+    """plan_structure and build_model must agree, since preview.py uses the plan."""
+    blocks = load_building_blocks(MODEL_DIR)
+    rec = life_run(init_grids.two_glider, FRAMES)
+    plan = plan_structure(rec)
+    model = build_model(rec, blocks, unit=UNIT)
+
+    assert plan["cells"] == model["cells"]
+    assert plan["connection_lines"] == model["connection_lines"]
+    assert len(plan["rungs"]) == len(plan["connection_lines"])
+
+    n_base = sum(1 for _, _, t in plan["cells"] if t == 0)
+    expect = len(plan["cells"]) + n_base + len(plan["rungs"])
+    assert len(model["meshes"]) == expect, (
+        f"{len(model['meshes'])} meshes placed, plan implies {expect}")
+
+
+# --------------------------------------------------------------------- trees
+
+TREE_EXPECT = {          # cells, rungs at 22 frames, from tree_search.py
+    "tree_fork":     (210, 539),
+    "tree_cross":    (257, 672),
+    "tree_slender":  (239, 609),
+    "tree_crown":    (252, 628),
+    "tree_pine":     (609, 1636),
+}
+TREE_FRAMES = 22
+
+
+def test_tree_patterns_have_the_expected_shape():
+    for name, (n_cells, n_rungs) in TREE_EXPECT.items():
+        grid = getattr(init_grids, name)
+        rec = life_run(grid, TREE_FRAMES)
+        plan = plan_structure(rec)
+        assert len(plan["cells"]) == n_cells, (
+            f"{name}: {len(plan['cells'])} cells, expected {n_cells}")
+        assert len(plan["rungs"]) == n_rungs, (
+            f"{name}: {len(plan['rungs'])} rungs, expected {n_rungs}")
+
+
+def test_trees_never_touch_the_grid_boundary():
+    """A pattern that reaches the edge is clipped, and the shape is a lie."""
+    for name in init_grids.TREE_ART:
+        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
+        for side in (rec[:, :2, :], rec[:, -2:, :], rec[:, :, :2], rec[:, :, -2:]):
+            assert not side.any(), f"{name} reaches the edge of its grid"
+
+
+def test_trees_grow_upward_and_outward():
+    """A tree stands on a small foot and opens out above it."""
+    for name in init_grids.TREE_ART:
+        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
+        radius = []
+        for fr in rec:
+            ys, xs = np.nonzero(fr)
+            c = np.array([ys.mean(), xs.mean()])
+            radius.append(np.linalg.norm(np.c_[ys, xs] - c, axis=1).max())
+        radius = np.array(radius)
+        f = len(radius)
+
+        assert rec[-1].sum() > 0, f"{name} dies out before the top"
+        # the part that touches the plate must be the small end
+        assert radius[0] <= radius[2 * f // 3:].mean(), (
+            f"{name} starts wider than it ends, so it is standing on its crown")
+        assert radius[2 * f // 3:].mean() > radius[:f // 3].mean(), (
+            f"{name} does not widen towards the top")
+
+
+def test_trees_print_as_one_piece_on_a_plate_that_holds_them_up():
+    blocks = load_building_blocks(MODEL_DIR)
+    for name in init_grids.TREE_ART:
+        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
+        model = build_model(rec, blocks, unit=UNIT)
+
+        conn = check_connectivity(model)
+        assert len(conn["components"]) == 1, (
+            f"{name}: {len(conn['components'])} separate pieces")
+        assert not conn["floating"], f"{name}: a piece never reaches the plate"
+
+        _, cx, cy, r = make_circular_base(model, blocks)
+        pts = np.array([[x * UNIT, y * UNIT] for x, y, _ in model["cells"]])
+        assert np.hypot(pts[:, 0] - cx, pts[:, 1] - cy).max() <= r, (
+            f"{name} overhangs its plate")
+
+        # a top heavy tree must keep its centre of mass well inside the plate,
+        # every cell being the same part and so the same weight
+        com = pts.mean(axis=0)
+        lean = float(np.hypot(com[0] - cx, com[1] - cy))
+        assert lean < 0.5 * r, (
+            f"{name} leans {lean:.0f}mm off a {r:.0f}mm plate, it would tip")
+
+
+def test_from_art_round_trips():
+    grid = init_grids.from_art(["#.#", ".#.", "#.#"], size=11)
+    assert grid.shape == (11, 11)
+    assert grid.sum() == 5
+    ys, xs = np.nonzero(grid)
+    sub = grid[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    assert np.array_equal(sub, [[1, 0, 1], [0, 1, 0], [1, 0, 1]])
 
 
 def _run():
