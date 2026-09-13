@@ -22,7 +22,10 @@ Usage:
         --frames 15 --out output_stls/space_invader.stl --plot
 
     python conway3d_stl.py --array my_pattern.txt --frames 22 \
-        --circular-base --center --binary --out output_stls/mine.stl
+        --base plate --center --binary --out output_stls/mine.stl
+
+    python conway3d_stl.py --pattern tree_fork --frames 22 --base none \
+        --binary --out output_stls/tree_fork_handheld.stl
 """
 
 import argparse
@@ -140,8 +143,12 @@ def plan_structure(grid_record, verbose=False):
     return {"cells": cells, "rungs": rungs, "connection_lines": connection_lines}
 
 
-def build_model(grid_record, blocks, unit=10, verbose=False):
-    """Place a part mesh for every cell and every cell-to-cell link."""
+def build_model(grid_record, blocks, unit=10, verbose=False, cell_bases=True):
+    """Place a part mesh for every cell and every cell-to-cell link.
+
+    cell_bases adds the square footing under each cell of generation 0.  Leave
+    it off for a model meant to be held rather than stood up.
+    """
     plan = plan_structure(grid_record, verbose=verbose)
     meshes = []
 
@@ -152,7 +159,7 @@ def build_model(grid_record, blocks, unit=10, verbose=False):
         m.z += t * unit
         meshes.append(mesh.Mesh(np.copy(m.data)))
 
-        if t == 0:  # adding the base for printing
+        if t == 0 and cell_bases:  # adding the base for printing
             m = mesh.Mesh(np.copy(blocks["base"].data))
             m.x += x * unit
             m.y += y * unit
@@ -167,7 +174,8 @@ def build_model(grid_record, blocks, unit=10, verbose=False):
         meshes.append(mesh.Mesh(np.copy(m.data)))
 
     return {"meshes": meshes, "cells": plan["cells"],
-            "connection_lines": plan["connection_lines"], "unit": unit}
+            "connection_lines": plan["connection_lines"], "unit": unit,
+            "cell_bases": cell_bases}
 
 
 def check_connectivity(model):
@@ -253,16 +261,30 @@ def base_footprint(model, blocks):
 
 
 def make_circular_base(model, blocks, radius=None, thickness=3.0, segments=180,
-                       margin=2.0):
+                       margin=2.0, weld_to=None):
     """Build the plate and return (mesh, centre_x, centre_y, radius).
 
-    It spans from the underside of the per-cell bases upwards, so it fuses
-    with every cell that touches the plate.
+    It spans from the underside of the footing part upwards, so it fuses with
+    everything standing on the build plate.
+
+    weld_to is a z the plate top must clear.  Pass it when no footings are
+    placed: the plate then has to reach up into the generation 0 cells itself,
+    and a plate thinner than the cells hang down would touch nothing at all.
     """
     cx, cy, auto_r = base_footprint(model, blocks)
     if radius is None:
         radius = auto_r + margin
-    z0 = float(blocks["base"].points.reshape(-1, 3)[:, 2].min())  # -4mm, the plate
+    # -4mm: the underside of the footing part, which is where the build plate
+    # is.  Used even when no footings are placed, since the generation 0 cells
+    # reach down to -3.575 and so still meet a plate of any thickness.
+    z0 = float(blocks["base"].points.reshape(-1, 3)[:, 2].min())
+    if weld_to is not None and z0 + thickness < weld_to:
+        raise ValueError(
+            f"a {thickness}mm plate reaches z={z0 + thickness:.3f}, which is "
+            f"below z={weld_to:.3f} where the generation 0 cells start, so it "
+            f"would touch nothing. Use at least "
+            f"{weld_to - z0:.2f}mm, or add footings with --base both.")
+
     return cylinder_mesh(cx, cy, z0, z0 + thickness, radius, segments), cx, cy, radius
 
 
@@ -340,8 +362,12 @@ def main(argv=None):
                    help="write a binary STL instead of ASCII")
     p.add_argument("--center", action="store_true",
                    help="move the model over the origin, ready to slice")
-    p.add_argument("--circular-base", action="store_true",
-                   help="add a round plate under the model so it cannot tip")
+    p.add_argument("--base", choices=["cells", "none", "plate", "both"],
+                   default="cells",
+                   help="what goes underneath: 'cells' a square footing under "
+                        "each cell of generation 0 (default); 'none' nothing, "
+                        "for a piece to hold in the hand; 'plate' a round plate "
+                        "only; 'both' footings and plate")
     p.add_argument("--base-radius", type=float, default=None,
                    help="plate radius in mm (default: cover the whole model)")
     p.add_argument("--base-thickness", type=float, default=3.0,
@@ -369,16 +395,24 @@ def main(argv=None):
 
     grid_record = life_run(grid, args.frames)
     blocks = load_building_blocks(args.model_stls)
-    model = build_model(grid_record, blocks, unit=args.unit, verbose=args.verbose)
+    model = build_model(grid_record, blocks, unit=args.unit, verbose=args.verbose,
+                        cell_bases=args.base in ("cells", "both"))
 
     conn = check_connectivity(model)
 
     out_meshes = list(model["meshes"])
     plate = None
-    if args.circular_base:
-        plate, bx, by, br = make_circular_base(
-            model, blocks, radius=args.base_radius,
-            thickness=args.base_thickness, segments=args.base_segments)
+    if args.base in ("plate", "both"):
+        weld = None
+        if args.base == "plate":    # no footings, the plate must reach the cells
+            weld = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min()) + 0.25
+        try:
+            plate, bx, by, br = make_circular_base(
+                model, blocks, radius=args.base_radius,
+                thickness=args.base_thickness, segments=args.base_segments,
+                weld_to=weld)
+        except ValueError as exc:
+            p.error(str(exc))
         out_meshes.append(plate)
 
     if args.center:
@@ -393,12 +427,21 @@ def main(argv=None):
 
     print(f"grid {grid.shape[0]}x{grid.shape[1]}, {args.frames} frames")
     print(f"live cells: {len(model['cells'])}, rungs: {len(model['connection_lines'])}")
-    print(f"parts: {len(model['meshes'])}, triangles: {len(combined.data)}")
+    print(f"parts: {len(out_meshes)}, triangles: {len(combined.data)}")
     print(f"connected pieces: {len(conn['components'])}"
-          f" ({len(conn['floating'])} not reaching the base)")
+          f" ({len(conn['floating'])} not reaching generation 0)")
     if plate is not None:
-        print(f"circular base: radius {br:.1f}mm, {args.base_thickness}mm thick, "
-              f"centred at ({bx:.1f}, {by:.1f})")
+        print(f"base: round plate, radius {br:.1f}mm, {args.base_thickness}mm "
+              f"thick, centred at ({bx:.1f}, {by:.1f})"
+              + (" + footings" if args.base == "both" else ""))
+    elif args.base == "cells":
+        n = sum(1 for _, _, t in model["cells"] if t == 0)
+        print(f"base: {n} square footings under generation 0")
+    else:
+        print("base: none, the model is meant to be held rather than stood up")
+        if len(conn["components"]) > 1:
+            print(f"      note: {len(conn['components'])} loose pieces without "
+                  f"a plate to join them")
     print(f"wrote {args.out}")
 
     if args.plot:

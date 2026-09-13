@@ -63,6 +63,7 @@ def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0):
     plan = plan_structure(rec)
     if not plan["cells"]:
         return {"empty": True}
+    footings = sum(1 for _, _, t in plan["cells"] if t == 0)
 
     conn = check_connectivity(plan)
     cells = np.array(plan["cells"], dtype=float)
@@ -78,6 +79,7 @@ def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0):
         "empty": False,
         "cells": len(plan["cells"]),
         "rungs": len(plan["rungs"]),
+        "footings": footings,
         "height": float(xyz[:, 2].max() + cell_half - base_z),
         "width": (reach + cell_half) * 2,
         "plate": (reach + cell_half + 2.0) * 2,
@@ -153,13 +155,18 @@ class Designer(tk.Tk):
                      values=["version1", "version2", "version3"]
                      ).grid(row=1, column=1, sticky="e", pady=(4, 0))
 
-        self.v_base = tk.BooleanVar(value=True)
+        ttk.Label(side, text="base").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.v_base = tk.StringVar(value="cells")
+        base_box = ttk.Combobox(side, width=9, state="readonly",
+                                textvariable=self.v_base,
+                                values=["cells", "none", "plate", "both"])
+        base_box.grid(row=2, column=1, sticky="e", pady=(4, 0))
+        base_box.bind("<<ComboboxSelected>>", lambda e: self._analyse_later())
+
         self.v_center = tk.BooleanVar(value=True)
         self.v_binary = tk.BooleanVar(value=True)
-        ttk.Checkbutton(side, text="circular base", variable=self.v_base
-                        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(side, text="centre on origin", variable=self.v_center
-                        ).grid(row=3, column=0, columnspan=2, sticky="w")
+                        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Checkbutton(side, text="binary STL", variable=self.v_binary
                         ).grid(row=4, column=0, columnspan=2, sticky="w")
 
@@ -310,7 +317,8 @@ class Designer(tk.Tk):
         fig = Figure(figsize=(5.2, 6.4), dpi=100)
         ax = fig.add_subplot(projection="3d")
         info = draw(ax, rec, 10.0, title="", cell_half=cell_half, base_z=base_z,
-                    base_radius="auto" if self.v_base.get() else None)
+                    base_radius=("auto" if self.v_base.get() in ("plate", "both")
+                                 else None))
         fig.tight_layout()
         FigureCanvasTkAgg(fig, master=win).get_tk_widget().pack(fill="both", expand=True)
         if info:
@@ -338,14 +346,18 @@ class Designer(tk.Tk):
                 self.v_base.get(), self.v_center.get(), self.v_binary.get(), path)
         threading.Thread(target=self._build_worker, args=args, daemon=True).start()
 
-    def _build_worker(self, grid, frames, version, want_base, want_center,
+    def _build_worker(self, grid, frames, version, base_mode, want_center,
                       binary, path):
         try:
             blocks = load_building_blocks(f"./model_stls/{version}")
-            model = build_model(life_run(grid, frames), blocks, unit=10)
+            model = build_model(life_run(grid, frames), blocks, unit=10,
+                                cell_bases=base_mode in ("cells", "both"))
             meshes = list(model["meshes"])
-            if want_base:
-                plate, _, _, _ = make_circular_base(model, blocks)
+            if base_mode in ("plate", "both"):
+                weld = None
+                if base_mode == "plate":
+                    weld = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min()) + 0.25
+                plate, _, _, _ = make_circular_base(model, blocks, weld_to=weld)
                 meshes.append(plate)
             if want_center:
                 pts = np.concatenate([m.points.reshape(-1, 3) for m in meshes])
@@ -408,8 +420,11 @@ class Designer(tk.Tk):
                  f"parts:  {a['cells']} cells, {a['rungs']} rungs",
                  f"height: {a['height']:.0f} mm",
                  f"width:  {a['width']:.0f} mm",
-                 f"plate:  {a['plate']:.0f} mm across",
                  f"pieces: {a['pieces']}"]
+        if self.v_base.get() in ("plate", "both"):
+            lines.insert(-1, f"plate:  {a['plate']:.0f} mm across")
+        if self.v_base.get() in ("cells", "both"):
+            lines.insert(-1, f"footings: {a['footings']}")
         warn = []
         if a["clipped"]:
             warn.append("The pattern reaches the edge of the domain, so it is "
@@ -417,9 +432,13 @@ class Designer(tk.Tk):
                         "domain.")
         if a["died"]:
             warn.append("Everything is dead by the last generation.")
-        if a["pieces"] > 1 and not self.v_base.get():
-            warn.append(f"{a['pieces']} separate pieces. The circular base "
-                        "would join them.")
+        mode = self.v_base.get()
+        if a["pieces"] > 1 and mode not in ("plate", "both"):
+            warn.append(f"{a['pieces']} separate pieces. Setting base to "
+                        "'plate' or 'both' would join them into one.")
+        if mode == "none":
+            warn.append("No base: nothing holds this on the build plate, so it "
+                        "is meant to be held rather than stood up.")
         if warn:
             lines += ["", "— " + "\n— ".join(warn)]
         self._show_info("\n".join(lines))

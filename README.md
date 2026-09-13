@@ -21,8 +21,9 @@ That gap is bridged by **rungs**: wherever a live cell has a live *neighbour*
 in the next generation, a strut is placed linking the two. There are two rung
 parts, one for an orthogonal step and a longer one for a diagonal step.
 
-Cells alive in generation 0 also get a square **base** part underneath, and the
-whole model can optionally stand on a round **plate** (see below).
+What sits underneath is up to you: a square **footing** part beneath each cell
+of generation 0, a round **plate** under the whole thing, both, or nothing at
+all (see below).
 
 ### Rungs never go straight up
 
@@ -43,17 +44,38 @@ the plate.
 
 What this does *not* guarantee is that the model is a single object. Two seed
 clusters that never interact grow two separate towers. `check_connectivity()`
-reports this, the test suite checks it, and the circular base joins them anyway
-if you use one.
+reports this, the test suite checks it, and a plate joins them anyway if you
+use one.
 
-### The circular base
+### What goes underneath
 
-Patterns that spread as they grow are top heavy. `--circular-base` puts a disc
-under the model, by default sized to cover the *whole* model in plan view
-rather than just the cells touching the ground. That guarantees the centre of
-mass sits inside the footprint however far the shape leans. The disc starts at
-the same height as the underside of the per-cell bases, so it fuses with them
-into one solid.
+`--base` takes one of four values.
+
+| `--base` | what you get |
+|---|---|
+| `cells` | a square footing under each generation 0 cell. The default, and what the original project did |
+| `none` | nothing. Cells and rungs only, for a piece to turn over in your hand |
+| `plate` | a round plate and no footings |
+| `both` | footings and plate |
+
+Patterns that spread as they grow are top heavy, which is what the plate is
+for. It is sized by default to cover the *whole* model in plan view rather than
+just the cells touching the ground, so the centre of mass sits inside the
+footprint however far the shape leans. It starts at the height of the underside
+of a footing, so it fuses with the footings, and with `plate` it reaches up
+into the generation 0 cells directly.
+
+That last case has a floor. Generation 0 cells hang down to z = −3.575 and the
+plate starts at z = −4, so a plate thinner than 0.425 mm would sit entirely
+below them and touch nothing. Anything under 0.67 mm is refused with a message
+saying so. It is not a problem with `both`, where the footings bridge the gap.
+
+With `none` the lowest point of the model is the underside of a generation 0
+cell, at z = −3.575, and nothing is holding it to the build plate. It is a
+shape to hold, not one to stand up. Note also that only the plate can join
+separate towers into one object: a pattern that grows from two seeds which
+never interact is genuinely two pieces without it, and the tools will tell you
+so.
 
 ## Sizes
 
@@ -92,7 +114,11 @@ ships with Python but is a separate package on some Linux distributions
 
 ```
 python conway3d_stl.py --pattern tree_fork --frames 22 \
-    --circular-base --center --binary --out output_stls/tree_fork.stl
+    --base both --center --binary --out output_stls/tree_fork.stl
+
+# the same tree with nothing underneath, to hold rather than stand up
+python conway3d_stl.py --pattern tree_fork --frames 22 \
+    --base none --binary --out output_stls/tree_fork_handheld.stl
 ```
 
 The initial condition comes from exactly one of:
@@ -106,7 +132,7 @@ Other options:
 | flag | effect |
 |---|---|
 | `--frames N` | generations to run, counting the initial one. Sets the height. |
-| `--circular-base` | add the round plate |
+| `--base MODE` | `cells`, `none`, `plate` or `both`. Default `cells` |
 | `--base-radius`, `--base-thickness`, `--base-segments` | override the plate, default radius covers the model, 3 mm thick, 180 facets |
 | `--center` | move the model over the origin, ready to slice |
 | `--binary` | write a binary STL. Roughly four times smaller than the default ASCII |
@@ -115,8 +141,8 @@ Other options:
 | `--pad N` | surround the starting grid with N dead cells |
 | `--plot`, `--verbose` | diagnostic plots, and a line per rung placed |
 
-It prints the cell and rung counts, the triangle count and how many separate
-pieces the result is in.
+It prints the cell and rung counts, what base was used, the triangle count and
+how many separate pieces the result is in.
 
 ## Drawing your own
 
@@ -130,14 +156,19 @@ A small window. Set the size of the domain and press **Resize domain**, then
 paint live cells with the left mouse button and erase with the right. Dragging
 paints continuously.
 
+The **base** dropdown offers the same four choices as `--base` on the command
+line, and the drawing updates to match.
+
 The side panel keeps a running summary as you draw: how many cell and rung
-parts the model will need, how tall and wide it will print, the plate diameter,
-and how many separate pieces it will be in. It warns you when
+parts the model will need, how tall and wide it will print, the footing count
+and plate diameter where they apply, and how many separate pieces it will be
+in. It warns you when
 
 - the pattern reaches the edge of the domain, which silently clips it and means
   you are no longer simulating Life, so the domain needs to be bigger;
 - nothing survives to the last generation;
-- the model would come out in several pieces and you have the plate switched off.
+- the model would come out in several pieces, which only a plate can join;
+- the base is set to `none`, so nothing holds the result on the build plate.
 
 **Preview 3D** draws the structure without building geometry. **Generate STL…**
 writes the file, on a background thread so the window stays responsive.
@@ -205,7 +236,7 @@ the branches.
 | `tree_crown` | 252 | 628 | 110 mm | 643,912 | 32 MB |
 | `tree_pine` | 609 | 1,636 | 194 mm | 1,615,888 | 81 MB |
 
-Triangle and file sizes are for 22 generations with `--circular-base`, which
+Triangle and file sizes are for 22 generations with `--base both`; the plate
 adds 720 triangles of its own. All five are 217.6 mm tall. The first four are slender and
 open. `tree_pine` grows from a pi heptomino and is dense all the way up, a
 conifer rather than a bare tree, and by far the biggest print.
@@ -258,6 +289,9 @@ in with `--model-stls`.
   on a cell at each end, but there are a great many of them.
 - **Print in place.** There is nothing to assemble and no support is intended.
   The model is one connected solid provided the tools say it is one piece.
+- **`--base none` is for handling, not for printing straight off.** With
+  nothing underneath, generation 0 cells meet the bed at a rounded point.
+  Print it with footings and remove them, or use supports.
 - **The STL is a soup of overlapping closed solids**, not a single manifold
   surface. Slicers union it without complaint, but mesh validators will report
   it as not closed. That is expected.
@@ -295,12 +329,13 @@ clipping check matters, and why the drawing tool warns about it.
 python test_pipeline.py      # or: python -m pytest test_pipeline.py -q
 ```
 
-32 tests covering the rules, the parts, model assembly, the plate, pattern
-files and the shipped patterns. Beyond the Life checks above they confirm that
+37 tests covering the rules, the parts, model assembly, the base options,
+pattern files and the shipped patterns. Beyond the Life checks above they confirm that
 every building block is a closed surface with no non-manifold edges, that every
 placed rung physically reaches both cells it links and aims within 3° of its
 target, that models come out as one grounded piece, and that written STLs
-round trip. One test pins the placement logic to the geometry of an STL
+round trip, that each base mode places exactly the parts it should, and that a
+plate too thin to reach the cells is refused. One test pins the placement logic to the geometry of an STL
 produced before this repository existed.
 
 ## Layout

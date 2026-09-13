@@ -653,6 +653,93 @@ def test_designer_analysis_warns_about_a_clipped_domain():
     assert analyse(np.zeros((10, 10), dtype=int), 5)["empty"]
 
 
+# ---------------------------------------------------------------- base modes
+
+def _parts(cell_bases):
+    blocks = load_building_blocks(MODEL_DIR)
+    rec = life_run(init_grids.tree_fork, 10)
+    return blocks, rec, build_model(rec, blocks, unit=UNIT, cell_bases=cell_bases)
+
+
+def test_base_modes_place_exactly_the_right_parts():
+    blocks, rec, with_feet = _parts(True)
+    _, _, without = _parts(False)
+
+    n_cells = len(with_feet["cells"])
+    n_rungs = len(with_feet["connection_lines"])
+    n_feet = sum(1 for _, _, t in with_feet["cells"] if t == 0)
+    assert n_feet > 0, "the test pattern should touch the ground"
+
+    assert len(without["meshes"]) == n_cells + n_rungs, (
+        "a model with no footings must be cells and rungs and nothing else")
+    assert len(with_feet["meshes"]) == n_cells + n_rungs + n_feet, (
+        "one footing per generation 0 cell")
+    assert without["cells"] == with_feet["cells"], "footings changed the cells"
+    assert without["connection_lines"] == with_feet["connection_lines"]
+
+
+def test_handheld_model_has_nothing_below_the_cells():
+    """With no base at all the lowest point is the underside of a cell."""
+    blocks, _, model = _parts(False)
+    pts = np.concatenate([m.points.reshape(-1, 3) for m in model["meshes"]])
+    cell_bottom = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min())
+    assert abs(pts[:, 2].min() - cell_bottom) < 1e-6, (
+        f"lowest point is {pts[:, 2].min():.3f}, expected the cell at {cell_bottom:.3f}")
+
+    # and it is still one piece, since footings were never what held it together
+    assert len(check_connectivity(model)["components"]) == 1
+
+
+def test_plate_alone_welds_into_the_generation_0_cells():
+    """With no footings the plate has to reach up into the cells itself."""
+    blocks, _, model = _parts(False)
+    plate, cx, cy, r = make_circular_base(model, blocks, thickness=3.0)
+    top = float(plate.points.reshape(-1, 3)[:, 2].max())
+
+    verts = blocks["cell"].vectors.reshape(-1, 3)
+    ground = [(x, y) for x, y, t in model["cells"] if t == 0]
+    assert ground
+    for x, y in ground:
+        v = verts + np.array([x * UNIT, y * UNIT, 0.0])
+        inside = (v[:, 2] <= top) & (np.hypot(v[:, 0] - cx, v[:, 1] - cy) <= r)
+        assert inside.any(), f"cell at {(x, y)} does not reach into the plate"
+
+
+def test_a_plate_too_thin_to_reach_the_cells_is_refused():
+    blocks, _, model = _parts(False)
+    cell_bottom = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min())
+    weld = cell_bottom + 0.25
+
+    try:
+        make_circular_base(model, blocks, thickness=0.3, weld_to=weld)
+    except ValueError as exc:
+        assert "touch nothing" in str(exc)
+    else:
+        raise AssertionError("a plate that reaches nothing should be refused")
+
+    # thick enough is accepted, and so is any thickness when footings bridge it
+    make_circular_base(model, blocks, thickness=1.0, weld_to=weld)
+    make_circular_base(model, blocks, thickness=0.3, weld_to=None)
+
+
+def test_base_choice_survives_the_command_line():
+    import tempfile
+    from conway3d_stl import main as build_main
+    expect = {}
+    with tempfile.TemporaryDirectory() as d:
+        for mode in ["cells", "none", "plate", "both"]:
+            m = build_main(["--pattern", "tree_fork", "--frames", "6",
+                            "--base", mode, "--binary",
+                            "--out", os.path.join(d, f"{mode}.stl")])
+            expect[mode] = len(m["meshes"])
+            assert os.path.getsize(os.path.join(d, f"{mode}.stl")) > 0
+
+    # build_model's mesh list excludes the plate, so plate == none and both == cells
+    assert expect["none"] == expect["plate"], "the plate is not a placed part"
+    assert expect["cells"] == expect["both"], "footings should not depend on the plate"
+    assert expect["cells"] > expect["none"], "footings were not placed"
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = skipped = 0
