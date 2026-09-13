@@ -5,6 +5,7 @@ Time is the vertical axis, so the picture is the printed object seen from the
 side.
 
     python preview.py --pattern two_glider --frames 17 --out preview.png
+    python preview.py --array my_pattern.txt --frames 22 --out mine.png
     python preview.py --seeds trees.npz --frames 22 --out trees.png
 """
 
@@ -80,6 +81,8 @@ def draw(ax, grid_record, unit=10, title="", base_radius=None, elev=14, azim=35,
 def grid_from_args(args):
     if args.pattern:
         return np.asarray(getattr(init_grids, args.pattern))
+    if args.array:
+        return init_grids.load_pattern(args.array)
     return load_grid_from_image(args.image)
 
 
@@ -89,6 +92,8 @@ def main():
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--pattern")
     src.add_argument("--image")
+    src.add_argument("--array", help="pattern file of on/off cells "
+                                     "(text, .npy or .npz)")
     src.add_argument("--seeds", help=".npz of seed grids, one subplot each")
     p.add_argument("--frames", type=int, default=22)
     p.add_argument("--unit", type=float, default=10)
@@ -126,7 +131,8 @@ def main():
         rec = life_run(grid_from_args(args), args.frames)
         fig = plt.figure(figsize=(6, 7))
         ax = fig.add_subplot(projection="3d")
-        info = draw(ax, rec, args.unit, title=args.pattern or args.image,
+        info = draw(ax, rec, args.unit,
+                    title=args.pattern or args.array or args.image,
                     base_radius=args.base_radius, elev=args.elev, azim=args.azim,
                     cell_half=cell_half, base_z=base_z)
         if info:

@@ -17,6 +17,10 @@ from conway3d_stl import (base_footprint, build_model, check_connectivity,
                           load_grid_from_image, make_circular_base, plan_structure,
                           save_stl)
 
+class Skip(Exception):
+    """Raised by a test that cannot run here, e.g. tkinter is not installed."""
+
+
 MODEL_DIR = "./model_stls/version3"
 UNIT = 10
 FRAMES = 17  # collision settles into a pond at frame 15
@@ -533,20 +537,141 @@ def test_placed_cells_reproduce_the_simulated_history():
             f"{name}: placed cells do not match the simulation")
 
 
+# ------------------------------------------------------- pattern files + GUI
+
+def test_pattern_text_formats_all_parse():
+    glider = [[0, 1, 0], [0, 0, 1], [1, 1, 1]]
+    for label, text in [
+        ("ascii art",      ".#.\n..#\n###"),
+        ("plaintext O/.",  ".O.\n..O\nOOO"),
+        ("comma 0/1",      "0,1,0\n0,0,1\n1,1,1"),
+        ("space 0/1",      "0 1 0\n0 0 1\n1 1 1"),
+        ("tab 0/1",        "0\t1\t0\n0\t0\t1\n1\t1\t1"),
+        ("with comments",  "! a glider\n.#.\n..#\n###"),
+        ("asterisks",      ".*.\n..*\n***"),
+    ]:
+        got = init_grids.parse_art(text)
+        assert np.array_equal(got, glider), f"{label} parsed as {got.tolist()}"
+
+
+def test_ragged_rows_are_padded_with_dead_cells():
+    g = init_grids.parse_art("#\n###\n#")
+    assert g.shape == (3, 3)
+    assert np.array_equal(g, [[1, 0, 0], [1, 1, 1], [1, 0, 0]])
+
+
+def test_pattern_file_round_trip_preserves_the_domain():
+    """Blank rows are part of the domain the user chose, so they must survive."""
+    import tempfile
+    for name in ["tree_fork", "tree_pine", "two_glider"]:
+        grid = getattr(init_grids, name)
+        with tempfile.TemporaryDirectory() as d:
+            for ext in (".txt", ".npy"):
+                p = os.path.join(d, "p" + ext)
+                init_grids.save_pattern(grid, p, comment="round trip")
+                back = init_grids.load_pattern(p)
+                assert back.shape == grid.shape, (
+                    f"{name}{ext}: domain changed from {grid.shape} to {back.shape}")
+                assert np.array_equal(back, grid), f"{name}{ext}: cells changed"
+
+
+def test_pattern_loader_rejects_junk():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "bad.txt")
+        with open(p, "w") as fh:
+            fh.write("#.#\n#Q#\n")
+        try:
+            init_grids.load_pattern(p)
+        except ValueError as e:
+            assert "Q" in str(e)
+        else:
+            raise AssertionError("an unknown character should not be accepted")
+
+        empty = os.path.join(d, "empty.txt")
+        open(empty, "w").close()
+        try:
+            init_grids.load_pattern(empty)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an empty file should not be accepted")
+
+
+def test_array_input_gives_the_same_model_as_the_named_pattern():
+    import tempfile
+    from conway3d_stl import main as build_main
+    with tempfile.TemporaryDirectory() as d:
+        pat = os.path.join(d, "fork.txt")
+        init_grids.save_pattern(init_grids.tree_fork, pat)
+        a = build_main(["--array", pat, "--frames", "8", "--binary",
+                        "--out", os.path.join(d, "a.stl")])
+        b = build_main(["--pattern", "tree_fork", "--frames", "8", "--binary",
+                        "--out", os.path.join(d, "b.stl")])
+    assert a["cells"] == b["cells"]
+    assert a["connection_lines"] == b["connection_lines"]
+
+
+def _designer():
+    """designer.py needs tkinter, which is a separate package on some distros."""
+    try:
+        import designer
+    except ImportError as exc:                 # pragma: no cover
+        raise Skip(f"designer unavailable: {exc}")
+    return designer
+
+
+def test_resize_grid_keeps_the_drawing_centred():
+    resize_grid = _designer().resize_grid
+    g = init_grids.from_art(["###", "#.#", "###"], size=9)
+    assert int(g.sum()) == 8
+
+    grown = resize_grid(g, 21, 21)
+    assert grown.shape == (21, 21)
+    assert int(grown.sum()) == 8, "growing the domain lost cells"
+
+    ys, xs = np.nonzero(grown)
+    assert abs((ys.min() + ys.max()) / 2 - 10) <= 1, "not centred after growing"
+    assert abs((xs.min() + xs.max()) / 2 - 10) <= 1, "not centred after growing"
+
+    # shrinking crops rather than erroring
+    cropped = resize_grid(g, 3, 3)
+    assert cropped.shape == (3, 3)
+
+
+def test_designer_analysis_warns_about_a_clipped_domain():
+    analyse = _designer().analyse
+    roomy = analyse(init_grids.tree_pine, TREE_FRAMES)
+    assert not roomy["clipped"], "49x49 should be roomy enough for tree_pine"
+    assert roomy["pieces"] == 1
+    assert roomy["cells"] == TREE_EXPECT["tree_pine"][0]
+
+    cramped = analyse(init_grids.from_art(init_grids.TREE_ART["tree_pine"], 21),
+                      TREE_FRAMES)
+    assert cramped["clipped"], "a 21x21 domain must be reported as clipping"
+
+    assert analyse(np.zeros((10, 10), dtype=int), 5)["empty"]
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failed = 0
+    failed = skipped = 0
     for t in tests:
         try:
             t()
             print(f"PASS  {t.__name__}")
+        except Skip as e:
+            skipped += 1
+            print(f"SKIP  {t.__name__}  ({e})")
         except AssertionError as e:
             failed += 1
             print(f"FAIL  {t.__name__}\n      {e}")
         except Exception as e:
             failed += 1
             print(f"ERROR {t.__name__}\n      {type(e).__name__}: {e}")
-    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    ran = len(tests) - skipped
+    tail = f", {skipped} skipped" if skipped else ""
+    print(f"\n{ran - failed}/{ran} passed{tail}")
     return 1 if failed else 0
 
 

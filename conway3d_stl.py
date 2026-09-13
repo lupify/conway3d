@@ -20,6 +20,9 @@ Usage:
 
     python conway3d_stl.py --image initial_sates/space_invader_3_cute.png \
         --frames 15 --out output_stls/space_invader.stl --plot
+
+    python conway3d_stl.py --array my_pattern.txt --frames 22 \
+        --circular-base --center --binary --out output_stls/mine.stl
 """
 
 import argparse
@@ -324,6 +327,8 @@ def main(argv=None):
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--pattern", help="name of a grid defined in init_grids.py")
     src.add_argument("--image", help="1-bit bitmap to use as the initial grid")
+    src.add_argument("--array", help="pattern file of on/off cells "
+                                     "(text, .npy or .npz); see init_grids.load_pattern")
     p.add_argument("--frames", type=int, default=15,
                    help="number of generations, including the initial one")
     p.add_argument("--out", required=True, help="output STL path")
@@ -354,6 +359,8 @@ def main(argv=None):
         if grid is None:
             p.error(f"init_grids.py has no pattern named {args.pattern!r}")
         grid = np.asarray(grid)
+    elif args.array:
+        grid = init_grids.load_pattern(args.array)
     else:
         grid = load_grid_from_image(args.image)
 

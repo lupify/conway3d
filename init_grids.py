@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 
 k4grid = np.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -140,3 +142,86 @@ def from_art(rows, size=TREE_GRID_SIZE):
 for _name, _art in TREE_ART.items():
     globals()[_name] = from_art(_art)
 del _name, _art
+
+
+# ------------------------------------------------------------- pattern files
+#
+# A pattern file holds nothing but the on/off cells.  Two forms are read:
+#
+#   text   one line per row.  '#', 'O', 'o', '*', 'X', 'x' and '1' are live;
+#          '.', '0', '-', '_' and space are dead.  Lines beginning with '!'
+#          are comments.  Values may be separated by commas, tabs or spaces,
+#          otherwise each character is one cell.  Short rows are padded with
+#          dead cells, so ragged files load fine.  Every line is a row,
+#          blank ones included, so the file's shape is the domain and a save
+#          then load returns exactly what you drew.  This reads the plaintext
+#          ".cells" files used elsewhere in the Life world.
+#
+#   numpy  .npy, or .npz where the first array in the file is used.
+#
+# Anything non-zero counts as live, so a 0/1 CSV exported from a spreadsheet
+# loads without conversion.
+
+LIVE_CHARS = set("#Oo*Xx1")
+DEAD_CHARS = set(".0-_ ")
+
+
+def parse_art(text):
+    """Parse the text pattern format into a 2-D array of 0s and 1s."""
+    rows = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("!"):
+            continue
+        stripped = line.strip()
+        tokens = [t for t in re.split(r"[,\t ]+", stripped) if t]
+        if len(tokens) > 1 and all(len(t) == 1 for t in tokens):
+            cells = tokens                 # "0, 1, 0" or "0 1 0"
+        else:
+            cells = list(line.rstrip("\n"))  # one character per cell
+        row = []
+        for ch in cells:
+            if ch in LIVE_CHARS:
+                row.append(1)
+            elif ch in DEAD_CHARS or ch == "":
+                row.append(0)
+            else:
+                raise ValueError(f"unrecognised cell character {ch!r}")
+        rows.append(row)
+
+    if not rows:
+        raise ValueError("pattern file contains no cells")
+
+    width = max(len(r) for r in rows)
+    return np.array([r + [0] * (width - len(r)) for r in rows], dtype=int)
+
+
+def load_pattern(path):
+    """Read a pattern file, text or numpy, into a 2-D array of 0s and 1s."""
+    path = str(path)
+    if path.endswith(".npy"):
+        grid = np.load(path)
+    elif path.endswith(".npz"):
+        with np.load(path) as d:
+            grid = d[d.files[0]]
+    else:
+        with open(path) as fh:
+            return parse_art(fh.read())
+
+    grid = np.asarray(grid)
+    if grid.ndim != 2:
+        raise ValueError(f"expected a 2-D grid, got shape {grid.shape}")
+    return (grid != 0).astype(int)
+
+
+def save_pattern(grid, path, comment=None):
+    """Write a pattern out.  Text unless the name ends in .npy."""
+    grid = (np.asarray(grid) != 0).astype(int)
+    if str(path).endswith(".npy"):
+        np.save(path, grid)
+        return
+    lines = []
+    if comment:
+        lines += [f"! {line}" for line in str(comment).splitlines()]
+    lines += ["".join("#" if v else "." for v in row) for row in grid]
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
