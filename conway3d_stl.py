@@ -59,8 +59,51 @@ def conway_update(state, neighbors):
 conway_updatev = np.vectorize(conway_update)
 
 
-def life_run(grid_init, num_frames, rule_mask=conwayog_rule_mask):
-    """Run the game of life for num_frames generations (frame 0 is the input)."""
+def room_to_grow(grid, num_frames):
+    """Enlarge a grid so num_frames generations cannot reach its edge.
+
+    A pattern spreads by at most one cell per generation, so after num_frames
+    generations nothing is further than num_frames - 1 from where it started.
+    Leaving num_frames dead cells beyond the live cells therefore keeps the
+    outermost ring dead for the whole run, which makes the neighbour counts
+    exact and the result identical to Life on an unbounded plane.
+
+    A grid that is already roomy enough is returned untouched.
+    """
+    pad = grow_pad(grid, num_frames)
+    if not any(p for side in pad for p in side):
+        return np.asarray(grid)
+    return np.pad(np.asarray(grid), pad)
+
+
+def grow_pad(grid, num_frames):
+    """How much room_to_grow would add on each side, as ((top, bottom), (left, right))."""
+    grid = np.asarray(grid)
+    ys, xs = np.nonzero(grid)
+    if len(ys) == 0:
+        return ((0, 0), (0, 0))
+    return ((max(0, num_frames - int(ys.min())),
+             max(0, num_frames - int(grid.shape[0] - 1 - ys.max()))),
+            (max(0, num_frames - int(xs.min())),
+             max(0, num_frames - int(grid.shape[1] - 1 - xs.max()))))
+
+
+def life_run(grid_init, num_frames, rule_mask=conwayog_rule_mask,
+             boundary="grow"):
+    """Run the game of life for num_frames generations (frame 0 is the input).
+
+    boundary "wall" keeps the grid exactly as given and treats everything
+    outside it as permanently dead, so a pattern reaching the edge is cut off.
+    boundary "grow", the default, enlarges the grid as far as the run could
+    possibly need, so the pattern is never cut off and the result is true
+    unbounded Life.  Note that it therefore returns frames larger than the grid
+    passed in, whenever the pattern starts near an edge.
+    """
+    if boundary == "grow":
+        grid_init = room_to_grow(grid_init, num_frames)
+    elif boundary != "wall":
+        raise ValueError(f"boundary must be 'wall' or 'grow', not {boundary!r}")
+
     grid_history = np.zeros((num_frames, *grid_init.shape))
     grid_history[0, :, :] = grid_init
 
@@ -374,6 +417,11 @@ def main(argv=None):
                    help="plate thickness in mm")
     p.add_argument("--base-segments", type=int, default=180,
                    help="facets around the plate")
+    p.add_argument("--boundary", choices=["grow", "wall"], default="grow",
+                   help="'grow' lets the pattern spread past the edge of the "
+                        "starting grid, which is true unbounded Life (default); "
+                        "'wall' keeps the grid fixed and kills anything that "
+                        "reaches the edge")
     p.add_argument("--pad", type=int, default=0,
                    help="pad the initial grid with this many dead cells")
     p.add_argument("--plot", action="store_true", help="show the diagnostic plots")
@@ -393,7 +441,7 @@ def main(argv=None):
     if args.pad:
         grid = np.pad(grid, ((args.pad, args.pad), (args.pad, args.pad)))
 
-    grid_record = life_run(grid, args.frames)
+    grid_record = life_run(grid, args.frames, boundary=args.boundary)
     blocks = load_building_blocks(args.model_stls)
     model = build_model(grid_record, blocks, unit=args.unit, verbose=args.verbose,
                         cell_bases=args.base in ("cells", "both"))
@@ -425,7 +473,21 @@ def main(argv=None):
 
     combined = save_stl(out_meshes, args.out, ascii_mode=not args.binary)
 
-    print(f"grid {grid.shape[0]}x{grid.shape[1]}, {args.frames} frames")
+    print(f"grid {grid.shape[0]}x{grid.shape[1]}, {args.frames} frames, "
+          f"{args.boundary} boundary")
+    if grid_record.shape[1:] != grid.shape:
+        print(f"      grew to {grid_record.shape[1]}x{grid_record.shape[2]} so the "
+              f"pattern was not cut off")
+    elif args.boundary == "wall":
+        # say whether the wall actually changed the outcome, not merely whether
+        # the pattern came close to it
+        free = life_run(grid, args.frames, boundary="grow")
+        (r0, _), (c0, _) = grow_pad(grid, args.frames)
+        window = free[:, r0:r0 + grid.shape[0], c0:c0 + grid.shape[1]]
+        if free.sum() != window.sum() or not np.array_equal(window, grid_record):
+            print(f"      warning: the wall cut this pattern off, losing "
+                  f"{int(free.sum() - grid_record.sum())} cell parts. It is no "
+                  f"longer Conway's Life. Use --boundary grow.")
     print(f"live cells: {len(model['cells'])}, rungs: {len(model['connection_lines'])}")
     print(f"parts: {len(out_meshes)}, triangles: {len(combined.data)}")
     print(f"connected pieces: {len(conn['components'])}"

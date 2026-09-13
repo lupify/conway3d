@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 
 import init_grids
-from conway3d_stl import (build_model, check_connectivity, life_run,
+from conway3d_stl import (build_model, check_connectivity, grow_pad, life_run,
                           load_building_blocks, make_circular_base,
                           plan_structure, save_stl)
 
@@ -53,13 +53,14 @@ def resize_grid(grid, rows, cols):
     return out
 
 
-def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0):
+def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0,
+            boundary="grow"):
     """What this drawing would print as: size, part count, and the warnings."""
     grid = np.asarray(grid)
     if grid.sum() == 0:
         return {"empty": True}
 
-    rec = life_run(grid, frames)
+    rec = life_run(grid, frames, boundary=boundary)
     plan = plan_structure(rec)
     if not plan["cells"]:
         return {"empty": True}
@@ -72,8 +73,18 @@ def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0):
     centre = (lo2 + hi2) / 2
     reach = float(np.linalg.norm(xyz[:, :2] - centre, axis=1).max())
 
-    clipped = bool(rec[:, :2, :].any() or rec[:, -2:, :].any()
-                   or rec[:, :, :2].any() or rec[:, :, -2:].any())
+    # With a wall, say whether the wall actually changed anything rather than
+    # merely whether the pattern got close to it.  Compare against the same run
+    # with room to spread.
+    clipped, lost = False, 0
+    if boundary == "wall":
+        free = life_run(grid, frames, boundary="grow")
+        (r0, _), (c0, _) = grow_pad(grid, frames)
+        same_window = free[:, r0:r0 + grid.shape[0], c0:c0 + grid.shape[1]]
+        escaped = int(free.sum() - same_window.sum())
+        clipped = escaped > 0 or not np.array_equal(same_window, rec)
+        lost = int(free.sum() - rec.sum())
+    grew = (rec.shape[1] - grid.shape[0], rec.shape[2] - grid.shape[1])
 
     return {
         "empty": False,
@@ -87,6 +98,9 @@ def analyse(grid, frames, unit=10.0, cell_half=3.575, base_z=-4.0):
         "final_pop": int(rec[-1].sum()),
         "died": bool(rec[-1].sum() == 0),
         "clipped": clipped,
+        "lost": lost,
+        "grew": grew,
+        "domain": (rec.shape[1], rec.shape[2]),
     }
 
 
@@ -155,6 +169,13 @@ class Designer(tk.Tk):
                      values=["version1", "version2", "version3"]
                      ).grid(row=1, column=1, sticky="e", pady=(4, 0))
 
+        ttk.Label(side, text="boundary").grid(row=8, column=0, sticky="w")
+        self.v_boundary = tk.StringVar(value="grow")
+        bbox = ttk.Combobox(side, width=9, state="readonly",
+                            textvariable=self.v_boundary, values=["grow", "wall"])
+        bbox.grid(row=8, column=1, sticky="e")
+        bbox.bind("<<ComboboxSelected>>", lambda e: self._analyse_later())
+
         ttk.Label(side, text="base").grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.v_base = tk.StringVar(value="cells")
         base_box = ttk.Combobox(side, width=9, state="readonly",
@@ -177,7 +198,7 @@ class Designer(tk.Tk):
 
         self.info = tk.Text(side, width=30, height=13, relief="flat", wrap="word",
                             background="#f7f7f5", font=("TkDefaultFont", 9))
-        self.info.grid(row=7, column=0, columnspan=2, pady=(10, 0))
+        self.info.grid(row=9, column=0, columnspan=2, pady=(10, 0))
         self.info.configure(state="disabled")
 
         self.status = ttk.Label(self, text="", anchor="w", padding=(8, 3))
@@ -310,7 +331,8 @@ class Designer(tk.Tk):
         from preview import draw, part_extent
 
         cell_half, base_z = part_extent(f"./model_stls/{self.v_version.get()}")
-        rec = life_run(self.cells, int(self.v_frames.get()))
+        rec = life_run(self.cells, int(self.v_frames.get()),
+                       boundary=self.v_boundary.get())
 
         win = tk.Toplevel(self)
         win.title("Preview")
@@ -343,14 +365,16 @@ class Designer(tk.Tk):
         self.btn_build.configure(state="disabled")
         self.status.configure(text="building… this can take a minute")
         args = (self.cells.copy(), int(self.v_frames.get()), self.v_version.get(),
-                self.v_base.get(), self.v_center.get(), self.v_binary.get(), path)
+                self.v_base.get(), self.v_center.get(), self.v_binary.get(), path,
+                self.v_boundary.get())
         threading.Thread(target=self._build_worker, args=args, daemon=True).start()
 
     def _build_worker(self, grid, frames, version, base_mode, want_center,
-                      binary, path):
+                      binary, path, boundary="grow"):
         try:
             blocks = load_building_blocks(f"./model_stls/{version}")
-            model = build_model(life_run(grid, frames), blocks, unit=10,
+            model = build_model(life_run(grid, frames, boundary=boundary),
+                                blocks, unit=10,
                                 cell_bases=base_mode in ("cells", "both"))
             meshes = list(model["meshes"])
             if base_mode in ("plate", "both"):
@@ -405,7 +429,8 @@ class Designer(tk.Tk):
                             f"not updated automatically.")
             return
         try:
-            a = analyse(self.cells, int(self.v_frames.get()))
+            a = analyse(self.cells, int(self.v_frames.get()),
+                        boundary=self.v_boundary.get())
         except (tk.TclError, ValueError):
             return
 
@@ -414,7 +439,11 @@ class Designer(tk.Tk):
                             "Nothing survives to build.")
             return
 
-        lines = [f"domain {rows} x {cols}",
+        grew_r, grew_c = a["grew"]
+        domain = f"domain {rows} x {cols}"
+        if grew_r or grew_c:
+            domain += f"  -> grew to {a['domain'][0]} x {a['domain'][1]}"
+        lines = [domain,
                  f"drawn: {int(self.cells.sum())} live cells",
                  "",
                  f"parts:  {a['cells']} cells, {a['rungs']} rungs",
@@ -427,9 +456,9 @@ class Designer(tk.Tk):
             lines.insert(-1, f"footings: {a['footings']}")
         warn = []
         if a["clipped"]:
-            warn.append("The pattern reaches the edge of the domain, so it is "
-                        "being cut off and is no longer true Life. Enlarge the "
-                        "domain.")
+            warn.append(f"The wall is cutting this pattern off, losing "
+                        f"{a['lost']} cell parts, so it is no longer true Life. "
+                        f"Set boundary to 'grow', or enlarge the domain.")
         if a["died"]:
             warn.append("Everything is dead by the last generation.")
         mode = self.v_base.get()

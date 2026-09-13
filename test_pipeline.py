@@ -12,7 +12,8 @@ from stl import mesh
 
 import init_grids
 from conway3d_stl import (base_footprint, build_model, check_connectivity,
-                          conway_update, conwayog_rule_mask,
+                          conway_update, conwayog_rule_mask, grow_pad,
+                          room_to_grow,
                           cylinder_mesh, life_run, load_building_blocks,
                           load_grid_from_image, make_circular_base, plan_structure,
                           save_stl)
@@ -32,13 +33,13 @@ def test_still_lifes_and_oscillators():
     """Sanity-check the rule implementation on known patterns."""
     block = np.zeros((6, 6), dtype=int)
     block[2:4, 2:4] = 1
-    rec = life_run(block, 4)
+    rec = life_run(block, 4, boundary="wall")   # fixed grid, this is a rule test
     for t in range(4):
         assert np.array_equal(rec[t], block), f"block decayed at t={t}"
 
     blinker = np.zeros((6, 6), dtype=int)
     blinker[3, 2:5] = 1
-    rec = life_run(blinker, 5)
+    rec = life_run(blinker, 5, boundary="wall")
     assert np.array_equal(rec[0], rec[2]), "blinker period is not 2"
     assert not np.array_equal(rec[0], rec[1]), "blinker did not oscillate"
     assert rec[1].sum() == 3, "blinker changed cell count"
@@ -456,7 +457,7 @@ CANONICAL = {
 def test_canonical_patterns_have_their_known_periods():
     """Still lifes hold, oscillators return, spaceships move by the right step."""
     for name, (seed, period, disp) in CANONICAL.items():
-        rec = life_run(np.pad(seed, 20), period * 3 + 1)
+        rec = life_run(np.pad(seed, 20), period * 3 + 1, boundary="wall")
         start = rec[0]
 
         for k in (1, 2, 3):
@@ -646,9 +647,25 @@ def test_designer_analysis_warns_about_a_clipped_domain():
     assert roomy["pieces"] == 1
     assert roomy["cells"] == TREE_EXPECT["tree_pine"][0]
 
-    cramped = analyse(init_grids.from_art(init_grids.TREE_ART["tree_pine"], 21),
-                      TREE_FRAMES)
-    assert cramped["clipped"], "a 21x21 domain must be reported as clipping"
+    # 21x21 looks tight but the wall never actually bites, and saying otherwise
+    # would be a false alarm
+    roomy_enough = init_grids.from_art(init_grids.TREE_ART["tree_pine"], 21)
+    assert not analyse(roomy_enough, TREE_FRAMES, boundary="wall")["clipped"]
+    assert analyse(roomy_enough, TREE_FRAMES, boundary="wall")["cells"] == \
+        TREE_EXPECT["tree_pine"][0]
+
+    cramped = init_grids.from_art(init_grids.TREE_ART["tree_pine"], 15)
+    walled = analyse(cramped, TREE_FRAMES, boundary="wall")
+    assert walled["clipped"], "a 15x15 wall does cut tree_pine off"
+    assert walled["lost"] > 0, "cells were lost but none were reported"
+    assert walled["cells"] < TREE_EXPECT["tree_pine"][0]
+
+    # the same drawing with a growing boundary is not clipped, it is enlarged
+    grown = analyse(cramped, TREE_FRAMES, boundary="grow")
+    assert not grown["clipped"], "nothing is cut off when the grid can grow"
+    assert grown["grew"] != (0, 0), "the grid should have had to grow"
+    assert grown["cells"] == TREE_EXPECT["tree_pine"][0], (
+        "growing from a cramped grid must give the same model as a roomy one")
 
     assert analyse(np.zeros((10, 10), dtype=int), 5)["empty"]
 
@@ -738,6 +755,81 @@ def test_base_choice_survives_the_command_line():
     assert expect["none"] == expect["plate"], "the plate is not a placed part"
     assert expect["cells"] == expect["both"], "footings should not depend on the plate"
     assert expect["cells"] > expect["none"], "footings were not placed"
+
+
+# ------------------------------------------------------------ boundary modes
+
+def _normalise(rec):
+    """Live cells of each frame, moved to the origin, so grids of any size compare."""
+    out = []
+    for fr in rec:
+        ys, xs = np.nonzero(fr)
+        out.append(() if len(ys) == 0 else
+                   tuple(sorted(zip(ys - ys.min(), xs - xs.min()))))
+    return out
+
+
+def test_grow_leaves_a_roomy_grid_alone():
+    for name in init_grids.TREE_ART:
+        grid = getattr(init_grids, name)
+        assert grow_pad(grid, TREE_FRAMES) == ((0, 0), (0, 0)), (
+            f"{name} already has room, growing should be a no-op")
+        assert room_to_grow(grid, TREE_FRAMES).shape == grid.shape
+
+    empty = np.zeros((8, 8), dtype=int)
+    assert room_to_grow(empty, 10).shape == (8, 8), "nothing alive, nothing to grow"
+
+
+def test_grow_leaves_the_outermost_ring_dead_for_the_whole_run():
+    """That is what makes the neighbour counts exact rather than merely roomy."""
+    for size in (7, 11, 15, 21):
+        grid = init_grids.from_art(init_grids.TREE_ART["tree_pine"], size)
+        rec = life_run(grid, TREE_FRAMES, boundary="grow")
+        for side in (rec[:, :1, :], rec[:, -1:, :], rec[:, :, :1], rec[:, :, -1:]):
+            assert not side.any(), (
+                f"a {size}x{size} start grew too little, the edge came alive")
+
+
+def test_grow_from_a_cramped_grid_equals_a_huge_fixed_one():
+    for name in init_grids.TREE_ART:
+        art = init_grids.TREE_ART[name]
+        cramped = life_run(init_grids.from_art(art, 11), TREE_FRAMES, boundary="grow")
+        enormous = life_run(init_grids.from_art(art, 201), TREE_FRAMES, boundary="wall")
+        assert _normalise(cramped) == _normalise(enormous), (
+            f"{name}: growing from 11x11 differs from a 201x201 field")
+
+
+def test_wall_clips_and_grow_does_not():
+    art = init_grids.TREE_ART["tree_pine"]
+    full = TREE_EXPECT["tree_pine"][0]
+
+    walled = plan_structure(life_run(init_grids.from_art(art, 15), TREE_FRAMES,
+                                     boundary="wall"))
+    assert len(walled["cells"]) < full, "a 15x15 wall should cost cells"
+
+    grown = plan_structure(life_run(init_grids.from_art(art, 15), TREE_FRAMES,
+                                    boundary="grow"))
+    assert len(grown["cells"]) == full, "growing should recover the whole pattern"
+
+
+def test_boundary_default_changes_nothing_that_ships():
+    """Every shipped pattern is clear of its own boundary, so the modes agree."""
+    for name, frames in ([(n, TREE_FRAMES) for n in init_grids.TREE_ART]
+                         + [("two_glider", 17)]):
+        grid = getattr(init_grids, name)
+        a = plan_structure(life_run(grid, frames, boundary="wall"))
+        b = plan_structure(life_run(grid, frames, boundary="grow"))
+        assert len(a["cells"]) == len(b["cells"]), f"{name}: cell count differs"
+        assert len(a["rungs"]) == len(b["rungs"]), f"{name}: rung count differs"
+
+
+def test_unknown_boundary_is_refused():
+    try:
+        life_run(init_grids.tree_fork, 5, boundary="toroidal")
+    except ValueError as exc:
+        assert "toroidal" in str(exc)
+    else:
+        raise AssertionError("an unknown boundary should not be accepted")
 
 
 def _run():

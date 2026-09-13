@@ -96,6 +96,9 @@ def main():
                                      "(text, .npy or .npz)")
     src.add_argument("--seeds", help=".npz of seed grids, one subplot each")
     p.add_argument("--frames", type=int, default=22)
+    p.add_argument("--boundary", choices=["grow", "wall"], default="grow",
+                   help="let the pattern spread past the edge of the grid, or "
+                        "cut it off there")
     p.add_argument("--unit", type=float, default=10)
     p.add_argument("--out", required=True)
     p.add_argument("--cols", type=int, default=4)
@@ -115,7 +118,7 @@ def main():
         fig = plt.figure(figsize=(3.1 * cols, 3.5 * rows))
         for i, k in enumerate(keys, 1):
             ax = fig.add_subplot(rows, cols, i, projection="3d")
-            rec = life_run(np.asarray(d[k]), args.frames)
+            rec = life_run(np.asarray(d[k]), args.frames, boundary=args.boundary)
             info = draw(ax, rec, args.unit, title=k, elev=args.elev,
                         azim=args.azim, cell_half=cell_half, base_z=base_z,
                         base_radius=args.base_radius)
@@ -128,7 +131,7 @@ def main():
                              f"{info['height']:.0f}mm tall, "
                              f"{info['width']:.0f}mm wide", fontsize=7)
     else:
-        rec = life_run(grid_from_args(args), args.frames)
+        rec = life_run(grid_from_args(args), args.frames, boundary=args.boundary)
         fig = plt.figure(figsize=(6, 7))
         ax = fig.add_subplot(projection="3d")
         info = draw(ax, rec, args.unit,

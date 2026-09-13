@@ -77,6 +77,35 @@ separate towers into one object: a pattern that grows from two seeds which
 never interact is genuinely two pieces without it, and the tools will tell you
 so.
 
+### The edge of the domain
+
+A pattern that runs into the edge of its grid stops being Conway's Life: cells
+that should be born outside never appear, and the neighbour counts near the
+edge go wrong. `--boundary` decides what happens there.
+
+| `--boundary` | behaviour |
+|---|---|
+| `grow` | the grid is enlarged as far as the run could need, so the pattern spreads freely and the result is Life on an unbounded plane. The default |
+| `wall` | the grid stays exactly as given and everything outside it is permanently dead, so a pattern reaching the edge is cut off |
+
+`grow` works out the room needed in advance rather than growing step by step. A
+pattern spreads by at most one cell per generation, so after N generations
+nothing is further than N − 1 from where it started. Leaving N dead cells
+beyond the live cells therefore keeps the outermost ring dead for the whole
+run, which is exactly the condition for the neighbour counts to be right. A
+grid that is already roomy enough is left untouched, which is why every pattern
+shipped here gives byte-identical results under either setting.
+
+The consequence worth knowing is that with `grow` the model can be wider than
+the grid you drew. That is the point: the drawn domain is where you place the
+starting cells, not a box the result has to fit inside.
+
+`wall` is a deliberate choice rather than a mistake. A bounded box gives
+different and sometimes more interesting behaviour, since patterns die against
+the sides. When it changes the outcome, the tools say so and say how many cell
+parts were lost, comparing against the same run with room to spread rather than
+just warning that the pattern got close to the edge.
+
 ## Sizes
 
 Height depends only on the number of generations:
@@ -138,6 +167,7 @@ Other options:
 | `--binary` | write a binary STL. Roughly four times smaller than the default ASCII |
 | `--model-stls DIR` | choose the part set, default `./model_stls/version3` |
 | `--unit MM` | lattice pitch, must match the parts |
+| `--boundary MODE` | `grow` or `wall`. Default `grow` |
 | `--pad N` | surround the starting grid with N dead cells |
 | `--plot`, `--verbose` | diagnostic plots, and a line per rung placed |
 
@@ -156,16 +186,17 @@ A small window. Set the size of the domain and press **Resize domain**, then
 paint live cells with the left mouse button and erase with the right. Dragging
 paints continuously.
 
-The **base** dropdown offers the same four choices as `--base` on the command
-line, and the drawing updates to match.
+The **base** and **boundary** dropdowns offer the same choices as `--base` and
+`--boundary` on the command line, and the summary updates to match.
 
 The side panel keeps a running summary as you draw: how many cell and rung
 parts the model will need, how tall and wide it will print, the footing count
-and plate diameter where they apply, and how many separate pieces it will be
-in. It warns you when
+and plate diameter where they apply, how far the domain had to grow, and how
+many separate pieces it will be in. It warns you when
 
-- the pattern reaches the edge of the domain, which silently clips it and means
-  you are no longer simulating Life, so the domain needs to be bigger;
+- the wall is actually cutting the pattern off, with the number of cell parts
+  lost, which means you are no longer simulating Life. It only says this when
+  the wall really changes the outcome, not merely when the pattern gets close;
 - nothing survives to the last generation;
 - the model would come out in several pieces, which only a plate can join;
 - the base is set to `none`, so nothing holds the result on the build plate.
@@ -208,7 +239,7 @@ value counts as live.
 
 ```
 python preview.py --pattern tree_crown --frames 22 --base-radius auto --out t.png
-python preview.py --array my_pattern.txt --frames 22 --out mine.png
+python preview.py --array my_pattern.txt --frames 22 --boundary wall --out mine.png
 python preview.py --seeds candidates.npz --frames 22 --cols 4 --out grid.png
 ```
 
@@ -319,9 +350,13 @@ Yes, and the test suite checks it rather than asserting it.
 - The placed cells are read back out of the model and compared against the
   simulation, so the print is a faithful record with one cell part per live cell.
 
-The simulation uses a finite grid with dead cells outside it, which equals
-infinite Life only while the pattern stays clear of the edge. That is why the
-clipping check matters, and why the drawing tool warns about it.
+The simulation runs on a finite grid with dead cells outside it, which equals
+unbounded Life only while the pattern stays clear of the edge. The default
+`--boundary grow` guarantees that by sizing the grid in advance, and the tests
+above confirm it by checking that the outermost ring never comes alive and that
+growing from an 11x11 start matches a 201x201 field. With `--boundary wall` the
+pattern can be cut off, which is a legitimate thing to want, and the tools say
+so when it happens.
 
 ## Tests
 
@@ -329,13 +364,14 @@ clipping check matters, and why the drawing tool warns about it.
 python test_pipeline.py      # or: python -m pytest test_pipeline.py -q
 ```
 
-37 tests covering the rules, the parts, model assembly, the base options,
-pattern files and the shipped patterns. Beyond the Life checks above they confirm that
+43 tests covering the rules, the parts, model assembly, the base and boundary
+options, pattern files and the shipped patterns. Beyond the Life checks above they confirm that
 every building block is a closed surface with no non-manifold edges, that every
 placed rung physically reaches both cells it links and aims within 3° of its
 target, that models come out as one grounded piece, and that written STLs
 round trip, that each base mode places exactly the parts it should, and that a
-plate too thin to reach the cells is refused. One test pins the placement logic to the geometry of an STL
+plate too thin to reach the cells is refused, and that growing the domain gives
+the same answer as an enormous fixed one. One test pins the placement logic to the geometry of an STL
 produced before this repository existed.
 
 ## Layout
