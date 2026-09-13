@@ -18,14 +18,14 @@ Usage:
     python conway3d_stl.py --pattern two_glider --frames 17 \
         --out output_stls/two_glider_pond.stl
 
-    python conway3d_stl.py --image initial_sates/space_invader_3_cute.png \
+    python conway3d_stl.py --image initial_states/space_invader_3_cute.png \
         --frames 15 --out output_stls/space_invader.stl --plot
 
     python conway3d_stl.py --array my_pattern.txt --frames 22 \
         --base plate --center --binary --out output_stls/mine.stl
 
-    python conway3d_stl.py --pattern tree_fork --frames 22 --base none \
-        --binary --out output_stls/tree_fork_handheld.stl
+    python conway3d_stl.py --pattern gosper_glider_gun --frames 40 \
+        --base both --center --binary --out output_stls/gun.stl
 """
 
 import argparse
@@ -291,8 +291,8 @@ def cylinder_mesh(cx, cy, z0, z1, radius, segments=180):
 def base_footprint(model, blocks):
     """Centre and radius of the smallest disc covering the whole model in xy.
 
-    A tree-shaped model is top heavy, so the plate is sized to the canopy
-    rather than to the few cells that touch the plate.
+    A pattern that spreads as it runs is widest well above the plate, so the
+    plate is sized to the whole model rather than to the few cells that touch it.
     """
     unit = model["unit"]
     pts = np.array([[x * unit, y * unit] for x, y, _ in model["cells"]])

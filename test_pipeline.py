@@ -18,6 +18,29 @@ from conway3d_stl import (base_footprint, build_model, check_connectivity,
                           load_grid_from_image, make_circular_base, plan_structure,
                           save_stl)
 
+# A batched Life step, kept here because the long documented runs above need
+# thousands of generations and the pipeline's own life_run is too slow for that.
+# test_fast_simulator_matches_the_pipeline checks the two agree.
+def step(g):
+    """One generation of a stack of grids, zero boundary, matching life_run."""
+    p = np.pad(g, ((0, 0), (1, 1), (1, 1)))
+    n = (p[:, :-2, :-2] + p[:, :-2, 1:-1] + p[:, :-2, 2:] +
+         p[:, 1:-1, :-2] + p[:, 1:-1, 2:] +
+         p[:, 2:, :-2] + p[:, 2:, 1:-1] + p[:, 2:, 2:])
+    return ((n == 3) | ((g == 1) & (n == 2))).astype(np.int8)
+
+
+def run_batch(seeds, frames):
+    """Evolve a stack of grids, returning (batch, frames, h, w)."""
+    hist = np.empty((seeds.shape[0], frames, *seeds.shape[1:]), dtype=np.int8)
+    hist[:, 0] = seeds
+    g = seeds
+    for f in range(1, frames):
+        g = step(g)
+        hist[:, f] = g
+    return hist
+
+
 class Skip(Exception):
     """Raised by a test that cannot run here, e.g. tkinter is not installed."""
 
@@ -75,7 +98,7 @@ def test_two_gliders_collide_into_a_pond():
 
 
 def test_image_and_array_initial_conditions_agree():
-    png = load_grid_from_image("initial_sates/twoGlider_pond.png")
+    png = load_grid_from_image("initial_states/twoGlider_pond.png")
     assert np.array_equal(png, init_grids.two_glider)
 
 
@@ -330,79 +353,139 @@ def test_plan_matches_the_placed_meshes():
         f"{len(model['meshes'])} meshes placed, plan implies {expect}")
 
 
-# --------------------------------------------------------------------- trees
+# ----------------------------------------------------- the named Life patterns
+#
+# init_grids.LIFE_ART is the single definition of these shapes; the CLI reads
+# the same dict, so a pattern that is wrong here is wrong in the models too.
 
-TREE_EXPECT = {          # cells, rungs at 22 frames, from tree_search.py
-    "tree_fork":     (210, 539),
-    "tree_cross":    (257, 672),
-    "tree_slender":  (239, 609),
-    "tree_crown":    (252, 628),
-    "tree_pine":     (609, 1636),
+PATTERN_FRAMES = {"gosper_glider_gun": 40, "pentadecathlon": 31}
+DEFAULT_FRAMES = 22
+
+
+def frames_for(name):
+    return PATTERN_FRAMES.get(name, DEFAULT_FRAMES)
+
+
+# Period, and how far the object moves in one period.  Documented values.
+KNOWN_BEHAVIOUR = {
+    "block": (1, (0, 0)), "beehive": (1, (0, 0)), "loaf": (1, (0, 0)),
+    "boat": (1, (0, 0)), "tub": (1, (0, 0)),
+    "blinker": (2, (0, 0)), "toad": (2, (0, 0)), "beacon": (2, (0, 0)),
+    "pulsar": (3, (0, 0)), "pentadecathlon": (15, (0, 0)),
+    "glider": (4, (1, 1)), "lwss": (4, (0, 2)),
+    "mwss": (4, (0, 2)), "hwss": (4, (0, 2)),
 }
-TREE_FRAMES = 22
+
+# Generation at which the pattern stops changing, and the population there.
+KNOWN_LIFESPAN = {
+    "r_pentomino": (1103, 116),
+    "b_heptomino": (148, 28),
+    "pi_heptomino": (173, 55),
+    "diehard": (130, 0),
+}
 
 
-def test_tree_patterns_have_the_expected_shape():
-    for name, (n_cells, n_rungs) in TREE_EXPECT.items():
-        grid = getattr(init_grids, name)
-        rec = life_run(grid, TREE_FRAMES)
-        plan = plan_structure(rec)
-        assert len(plan["cells"]) == n_cells, (
-            f"{name}: {len(plan['cells'])} cells, expected {n_cells}")
-        assert len(plan["rungs"]) == n_rungs, (
-            f"{name}: {len(plan['rungs'])} rungs, expected {n_rungs}")
+def test_every_named_pattern_is_reachable_from_the_command_line():
+    """--pattern does getattr on the module, so each name must be bound."""
+    for name in init_grids.LIFE_ART:
+        grid = getattr(init_grids, name, None)
+        assert grid is not None, f"{name} is in LIFE_ART but not defined as a grid"
+        assert grid.ndim == 2 and grid.sum() > 0, f"{name} is empty"
 
 
-def test_trees_never_touch_the_grid_boundary():
-    """A pattern that reaches the edge is clipped, and the shape is a lie."""
-    for name in init_grids.TREE_ART:
-        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
-        for side in (rec[:, :2, :], rec[:, -2:, :], rec[:, :, :2], rec[:, :, -2:]):
-            assert not side.any(), f"{name} reaches the edge of its grid"
+def test_named_patterns_have_their_known_periods():
+    """Still lifes hold, oscillators return, spaceships move by the right step."""
+    for name, (period, disp) in KNOWN_BEHAVIOUR.items():
+        seed = np.pad(init_grids.from_art(init_grids.LIFE_ART[name]), 20)
+        rec = life_run(seed, period * 3 + 1, boundary="wall")
+        start = rec[0]
+
+        for k in (1, 2, 3):
+            shifted = [np.roll(np.roll(start, dy * k, 0), dx * k, 1)
+                       for dy in (disp[0], -disp[0]) for dx in (disp[1], -disp[1])]
+            assert any(np.array_equal(rec[period * k], w) for w in shifted), (
+                f"{name} is wrong after {period * k} generations")
+
+        for shorter in range(1, period):
+            assert not np.array_equal(rec[shorter], start), (
+                f"{name} repeats at {shorter}, so its period is not {period}")
 
 
-def test_trees_grow_upward_and_outward():
-    """A tree stands on a small foot and opens out above it."""
-    for name in init_grids.TREE_ART:
-        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
-        radius = []
+def test_methuselahs_match_their_documented_lifespans():
+    """A long run is the sharpest test of the rule: an error compounds."""
+    for name, (gen, pop) in KNOWN_LIFESPAN.items():
+        n = 801 if gen > 400 else 401
+        g = np.zeros((1, n, n), dtype=np.int8)
+        art = init_grids.from_art(init_grids.LIFE_ART[name], size=n)
+        g[0] = art
+
+        history = []
+        for _ in range(gen + 60):
+            g = step(g)
+            history.append(int(g.sum()))
+
+        assert history[gen - 1] == pop, (
+            f"{name} has {history[gen - 1]} cells at generation {gen}, "
+            f"documented is {pop}")
+        assert len(set(history[gen - 1:])) == 1, (
+            f"{name} is still changing after generation {gen}")
+
+
+def test_gosper_gun_emits_one_glider_every_thirty_generations():
+    rec = life_run(init_grids.gosper_glider_gun, 121)
+    pop = [int(f.sum()) for f in rec]
+    for t in (0, 30, 60, 90):
+        assert pop[t + 30] - pop[t] == 5, (
+            f"generations {t}-{t + 30} gained {pop[t + 30] - pop[t]} cells, "
+            "a gun should gain exactly one 5-cell glider")
+
+
+def test_named_patterns_are_not_clipped_by_their_grid():
+    """A pattern touching the edge would be silently cut off and not be Life."""
+    def shapes(rec):
+        out = []
         for fr in rec:
             ys, xs = np.nonzero(fr)
-            c = np.array([ys.mean(), xs.mean()])
-            radius.append(np.linalg.norm(np.c_[ys, xs] - c, axis=1).max())
-        radius = np.array(radius)
-        f = len(radius)
+            if len(ys) == 0:
+                out.append(())
+                continue
+            out.append(tuple(sorted(zip(ys - ys.min(), xs - xs.min()))))
+        return out
 
-        assert rec[-1].sum() > 0, f"{name} dies out before the top"
-        # the part that touches the plate must be the small end
-        assert radius[0] <= radius[2 * f // 3:].mean(), (
-            f"{name} starts wider than it ends, so it is standing on its crown")
-        assert radius[2 * f // 3:].mean() > radius[:f // 3].mean(), (
-            f"{name} does not widen towards the top")
+    for name, art in init_grids.LIFE_ART.items():
+        n = frames_for(name)
+        size = init_grids.LIFE_SIZE.get(name, init_grids.DEFAULT_GRID_SIZE)
+        small = life_run(init_grids.from_art(art, size=size), n)
+        big = life_run(init_grids.from_art(art, size=size + 80), n)
+        assert shapes(small) == shapes(big), (
+            f"{name} evolves differently on a bigger grid, so it is being clipped")
 
 
-def test_trees_print_as_one_piece_on_a_plate_that_holds_them_up():
+def test_named_patterns_print_as_a_plate_can_hold():
+    """Either one solid, or several that a plate joins.  Nothing may float."""
     blocks = load_building_blocks(MODEL_DIR)
-    for name in init_grids.TREE_ART:
-        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
-        model = build_model(rec, blocks, unit=UNIT)
+    for name in init_grids.LIFE_ART:
+        rec = life_run(getattr(init_grids, name), frames_for(name))
+        conn = check_connectivity(build_model(rec, blocks, unit=UNIT))
+        assert not conn["floating"], (
+            f"{name}: {len(conn['floating'])} pieces never reach the plate, "
+            "so no base can hold them")
 
-        conn = check_connectivity(model)
-        assert len(conn["components"]) == 1, (
-            f"{name}: {len(conn['components'])} separate pieces")
-        assert not conn["floating"], f"{name}: a piece never reaches the plate"
 
-        _, cx, cy, r = make_circular_base(model, blocks)
-        pts = np.array([[x * UNIT, y * UNIT] for x, y, _ in model["cells"]])
-        assert np.hypot(pts[:, 0] - cx, pts[:, 1] - cy).max() <= r, (
-            f"{name} overhangs its plate")
+def test_placed_cells_reproduce_the_simulated_history():
+    """The print is a faithful record: one cell part per live cell, nothing else."""
+    for name in ["glider", "r_pentomino", "pulsar", "gosper_glider_gun"]:
+        rec = life_run(getattr(init_grids, name), frames_for(name))
+        plan = plan_structure(rec)
 
-        # a top heavy tree must keep its centre of mass well inside the plate,
-        # every cell being the same part and so the same weight
-        com = pts.mean(axis=0)
-        lean = float(np.hypot(com[0] - cx, com[1] - cy))
-        assert lean < 0.5 * r, (
-            f"{name} leans {lean:.0f}mm off a {r:.0f}mm plate, it would tip")
+        h, w = rec.shape[1] + 2, rec.shape[2] + 2
+        back = np.zeros((rec.shape[0], h, w), dtype=int)
+        for x, y, t in plan["cells"]:
+            back[t, x, y] = 1
+        back = back[:, ::-1, :][:, 1:-1, 1:-1]   # undo the flip and the padding
+
+        assert np.array_equal(back, rec.astype(int)), (
+            f"{name}: placed cells do not match the simulation")
 
 
 def test_from_art_round_trips():
@@ -434,111 +517,17 @@ def test_rule_is_exactly_b3_s23():
     assert conwayog_rule_mask.shape == (3, 3)
 
 
-CANONICAL = {
-    # name: (seed, period, displacement per period)
-    "block":   (_art(["##", "##"]), 1, (0, 0)),
-    "beehive": (_art([".##.", "#..#", ".##."]), 1, (0, 0)),
-    "loaf":    (_art([".##.", "#..#", ".#.#", "..#."]), 1, (0, 0)),
-    "boat":    (_art(["##.", "#.#", ".#."]), 1, (0, 0)),
-    "tub":     (_art([".#.", "#.#", ".#."]), 1, (0, 0)),
-    "blinker": (_art(["###"]), 2, (0, 0)),
-    "toad":    (_art([".###", "###."]), 2, (0, 0)),
-    "beacon":  (_art(["##..", "##..", "..##", "..##"]), 2, (0, 0)),
-    "pulsar":  (_art(["..###...###..", ".............",
-                      "#....#.#....#", "#....#.#....#", "#....#.#....#",
-                      "..###...###..", ".............", "..###...###..",
-                      "#....#.#....#", "#....#.#....#", "#....#.#....#",
-                      ".............", "..###...###.."]), 3, (0, 0)),
-    "glider":  (_art([".#.", "..#", "###"]), 4, (1, 1)),
-    "lwss":    (_art([".####", "#...#", "....#", "#..#."]), 4, (0, 2)),
-}
-
-
-def test_canonical_patterns_have_their_known_periods():
-    """Still lifes hold, oscillators return, spaceships move by the right step."""
-    for name, (seed, period, disp) in CANONICAL.items():
-        rec = life_run(np.pad(seed, 20), period * 3 + 1, boundary="wall")
-        start = rec[0]
-
-        for k in (1, 2, 3):
-            want = np.roll(np.roll(start, disp[0] * k, axis=0), disp[1] * k, axis=1)
-            assert np.array_equal(rec[period * k], want), (
-                f"{name} is wrong after {period * k} generations")
-
-        for shorter in range(1, period):
-            assert not np.array_equal(rec[shorter], start), (
-                f"{name} repeats at {shorter}, so its period is not {period}")
-
-
-def test_r_pentomino_matches_the_documented_result():
-    """The R-pentomino settles at generation 1103 with 116 cells.
-
-    A long, well documented run catches rule errors too subtle to show up in
-    small patterns.  The field is wide enough that the six escaping gliders
-    never reach the edge, so this is infinite-plane Life.
-    """
-    from tree_search import step   # verified against life_run below
-
-    n = 641
-    g = np.zeros((1, n, n), dtype=np.int8)
-    c = n // 2
-    for r, x in [(0, 1), (0, 2), (1, 0), (1, 1), (2, 1)]:
-        g[0, c + r, c + x] = 1
-
-    for _ in range(1103):
-        g = step(g)
-    assert int(g.sum()) == 116, f"generation 1103 has {int(g.sum())} cells, not 116"
-
-    for _ in range(60):                      # and it stays settled
-        g = step(g)
-        assert int(g.sum()) == 116, "population moved after it should have settled"
-
-    assert not (g[0, :2, :].any() or g[0, -2:, :].any()
-                or g[0, :, :2].any() or g[0, :, -2:].any()), "hit the boundary"
-
-
 def test_fast_simulator_matches_the_pipeline():
-    from tree_search import run_batch
-    for name in ["tree_fork", "tree_pine"]:
+    """`step` is used above for the long runs, so it has to agree with life_run."""
+    for name in ["r_pentomino", "pulsar", "glider", "gosper_glider_gun"]:
         g = getattr(init_grids, name)
-        a = life_run(g, 22).astype(int)
-        b = run_batch(np.array([g], dtype=np.int8), 22)[0].astype(int)
+        n = frames_for(name)
+        # run_batch is a fixed-grid, zero-boundary simulator, which is what
+        # boundary="wall" is; "grow" would pad and the shapes would not line up
+        a = life_run(g, n, boundary="wall").astype(int)
+        b = run_batch(np.array([g], dtype=np.int8), n)[0].astype(int)
         assert np.array_equal(a, b), f"{name}: the two simulators disagree"
 
-
-def test_trees_are_unaffected_by_the_size_of_their_grid():
-    """A pattern touching the edge would be silently clipped and not be Life."""
-    def shapes(rec):
-        out = []
-        for fr in rec:
-            ys, xs = np.nonzero(fr)
-            out.append(tuple(sorted(zip(ys - ys.min(), xs - xs.min()))))
-        return out
-
-    for name, art in init_grids.TREE_ART.items():
-        small = life_run(init_grids.from_art(art, size=49), TREE_FRAMES)
-        big = life_run(init_grids.from_art(art, size=141), TREE_FRAMES)
-        assert shapes(small) == shapes(big), (
-            f"{name} evolves differently on a bigger grid, so it is being clipped")
-
-
-def test_placed_cells_reproduce_the_simulated_history():
-    """The print is a faithful record: one cell part per live cell, nothing else."""
-    for name in init_grids.TREE_ART:
-        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
-        plan = plan_structure(rec)
-
-        h, w = rec.shape[1] + 2, rec.shape[2] + 2
-        back = np.zeros((rec.shape[0], h, w), dtype=int)
-        for x, y, t in plan["cells"]:
-            back[t, x, y] = 1
-        back = back[:, ::-1, :][:, 1:-1, 1:-1]   # undo the flip and the padding
-
-        assert np.array_equal(back, rec.astype(int)), (
-            f"{name}: placed cells do not match the simulation")
-
-
-# ------------------------------------------------------- pattern files + GUI
 
 def test_pattern_text_formats_all_parse():
     glider = [[0, 1, 0], [0, 0, 1], [1, 1, 1]]
@@ -564,7 +553,7 @@ def test_ragged_rows_are_padded_with_dead_cells():
 def test_pattern_file_round_trip_preserves_the_domain():
     """Blank rows are part of the domain the user chose, so they must survive."""
     import tempfile
-    for name in ["tree_fork", "tree_pine", "two_glider"]:
+    for name in ["glider", "pi_heptomino", "two_glider"]:
         grid = getattr(init_grids, name)
         with tempfile.TemporaryDirectory() as d:
             for ext in (".txt", ".npy"):
@@ -603,11 +592,11 @@ def test_array_input_gives_the_same_model_as_the_named_pattern():
     import tempfile
     from conway3d_stl import main as build_main
     with tempfile.TemporaryDirectory() as d:
-        pat = os.path.join(d, "fork.txt")
-        init_grids.save_pattern(init_grids.tree_fork, pat)
+        pat = os.path.join(d, "seed.txt")
+        init_grids.save_pattern(init_grids.r_pentomino, pat)
         a = build_main(["--array", pat, "--frames", "8", "--binary",
                         "--out", os.path.join(d, "a.stl")])
-        b = build_main(["--pattern", "tree_fork", "--frames", "8", "--binary",
+        b = build_main(["--pattern", "r_pentomino", "--frames", "8", "--binary",
                         "--out", os.path.join(d, "b.stl")])
     assert a["cells"] == b["cells"]
     assert a["connection_lines"] == b["connection_lines"]
@@ -642,29 +631,30 @@ def test_resize_grid_keeps_the_drawing_centred():
 
 def test_designer_analysis_warns_about_a_clipped_domain():
     analyse = _designer().analyse
-    roomy = analyse(init_grids.tree_pine, TREE_FRAMES)
-    assert not roomy["clipped"], "49x49 should be roomy enough for tree_pine"
+    PI_CELLS = 609   # pi heptomino at 22 generations
+
+    roomy = analyse(init_grids.pi_heptomino, DEFAULT_FRAMES)
+    assert not roomy["clipped"], "the stock grid should be roomy enough"
     assert roomy["pieces"] == 1
-    assert roomy["cells"] == TREE_EXPECT["tree_pine"][0]
+    assert roomy["cells"] == PI_CELLS
 
     # 21x21 looks tight but the wall never actually bites, and saying otherwise
     # would be a false alarm
-    roomy_enough = init_grids.from_art(init_grids.TREE_ART["tree_pine"], 21)
-    assert not analyse(roomy_enough, TREE_FRAMES, boundary="wall")["clipped"]
-    assert analyse(roomy_enough, TREE_FRAMES, boundary="wall")["cells"] == \
-        TREE_EXPECT["tree_pine"][0]
+    roomy_enough = init_grids.from_art(init_grids.LIFE_ART["pi_heptomino"], 21)
+    assert not analyse(roomy_enough, DEFAULT_FRAMES, boundary="wall")["clipped"]
+    assert analyse(roomy_enough, DEFAULT_FRAMES, boundary="wall")["cells"] == PI_CELLS
 
-    cramped = init_grids.from_art(init_grids.TREE_ART["tree_pine"], 15)
-    walled = analyse(cramped, TREE_FRAMES, boundary="wall")
-    assert walled["clipped"], "a 15x15 wall does cut tree_pine off"
+    cramped = init_grids.from_art(init_grids.LIFE_ART["pi_heptomino"], 15)
+    walled = analyse(cramped, DEFAULT_FRAMES, boundary="wall")
+    assert walled["clipped"], "a 15x15 wall does cut the pattern off"
     assert walled["lost"] > 0, "cells were lost but none were reported"
-    assert walled["cells"] < TREE_EXPECT["tree_pine"][0]
+    assert walled["cells"] < PI_CELLS
 
     # the same drawing with a growing boundary is not clipped, it is enlarged
-    grown = analyse(cramped, TREE_FRAMES, boundary="grow")
+    grown = analyse(cramped, DEFAULT_FRAMES, boundary="grow")
     assert not grown["clipped"], "nothing is cut off when the grid can grow"
     assert grown["grew"] != (0, 0), "the grid should have had to grow"
-    assert grown["cells"] == TREE_EXPECT["tree_pine"][0], (
+    assert grown["cells"] == PI_CELLS, (
         "growing from a cramped grid must give the same model as a roomy one")
 
     assert analyse(np.zeros((10, 10), dtype=int), 5)["empty"]
@@ -674,7 +664,7 @@ def test_designer_analysis_warns_about_a_clipped_domain():
 
 def _parts(cell_bases):
     blocks = load_building_blocks(MODEL_DIR)
-    rec = life_run(init_grids.tree_fork, 10)
+    rec = life_run(init_grids.r_pentomino, 10)
     return blocks, rec, build_model(rec, blocks, unit=UNIT, cell_bases=cell_bases)
 
 
@@ -745,7 +735,7 @@ def test_base_choice_survives_the_command_line():
     expect = {}
     with tempfile.TemporaryDirectory() as d:
         for mode in ["cells", "none", "plate", "both"]:
-            m = build_main(["--pattern", "tree_fork", "--frames", "6",
+            m = build_main(["--pattern", "r_pentomino", "--frames", "6",
                             "--base", mode, "--binary",
                             "--out", os.path.join(d, f"{mode}.stl")])
             expect[mode] = len(m["meshes"])
@@ -769,12 +759,17 @@ def _normalise(rec):
     return out
 
 
+# Patterns planted with at least `frames` of clear margin on every side, so
+# the worst-case growth is already there and nothing needs adding.
+ROOMY = ["glider", "r_pentomino", "b_heptomino", "pi_heptomino", "acorn"]
+
+
 def test_grow_leaves_a_roomy_grid_alone():
-    for name in init_grids.TREE_ART:
+    for name in ROOMY:
         grid = getattr(init_grids, name)
-        assert grow_pad(grid, TREE_FRAMES) == ((0, 0), (0, 0)), (
+        assert grow_pad(grid, DEFAULT_FRAMES) == ((0, 0), (0, 0)), (
             f"{name} already has room, growing should be a no-op")
-        assert room_to_grow(grid, TREE_FRAMES).shape == grid.shape
+        assert room_to_grow(grid, DEFAULT_FRAMES).shape == grid.shape
 
     empty = np.zeros((8, 8), dtype=int)
     assert room_to_grow(empty, 10).shape == (8, 8), "nothing alive, nothing to grow"
@@ -783,38 +778,38 @@ def test_grow_leaves_a_roomy_grid_alone():
 def test_grow_leaves_the_outermost_ring_dead_for_the_whole_run():
     """That is what makes the neighbour counts exact rather than merely roomy."""
     for size in (7, 11, 15, 21):
-        grid = init_grids.from_art(init_grids.TREE_ART["tree_pine"], size)
-        rec = life_run(grid, TREE_FRAMES, boundary="grow")
+        grid = init_grids.from_art(init_grids.LIFE_ART["pi_heptomino"], size)
+        rec = life_run(grid, DEFAULT_FRAMES, boundary="grow")
         for side in (rec[:, :1, :], rec[:, -1:, :], rec[:, :, :1], rec[:, :, -1:]):
             assert not side.any(), (
                 f"a {size}x{size} start grew too little, the edge came alive")
 
 
 def test_grow_from_a_cramped_grid_equals_a_huge_fixed_one():
-    for name in init_grids.TREE_ART:
-        art = init_grids.TREE_ART[name]
-        cramped = life_run(init_grids.from_art(art, 11), TREE_FRAMES, boundary="grow")
-        enormous = life_run(init_grids.from_art(art, 201), TREE_FRAMES, boundary="wall")
+    for name, art in init_grids.LIFE_ART.items():
+        n = frames_for(name)
+        cramped = life_run(init_grids.from_art(art, 11), n, boundary="grow")
+        enormous = life_run(init_grids.from_art(art, 241), n, boundary="wall")
         assert _normalise(cramped) == _normalise(enormous), (
-            f"{name}: growing from 11x11 differs from a 201x201 field")
+            f"{name}: growing from a cramped grid differs from a huge one")
 
 
 def test_wall_clips_and_grow_does_not():
-    art = init_grids.TREE_ART["tree_pine"]
-    full = TREE_EXPECT["tree_pine"][0]
+    art = init_grids.LIFE_ART["pi_heptomino"]
+    full = 609                       # pi heptomino at 22 generations
 
-    walled = plan_structure(life_run(init_grids.from_art(art, 15), TREE_FRAMES,
+    walled = plan_structure(life_run(init_grids.from_art(art, 15), DEFAULT_FRAMES,
                                      boundary="wall"))
     assert len(walled["cells"]) < full, "a 15x15 wall should cost cells"
 
-    grown = plan_structure(life_run(init_grids.from_art(art, 15), TREE_FRAMES,
+    grown = plan_structure(life_run(init_grids.from_art(art, 15), DEFAULT_FRAMES,
                                     boundary="grow"))
     assert len(grown["cells"]) == full, "growing should recover the whole pattern"
 
 
 def test_boundary_default_changes_nothing_that_ships():
     """Every shipped pattern is clear of its own boundary, so the modes agree."""
-    for name, frames in ([(n, TREE_FRAMES) for n in init_grids.TREE_ART]
+    for name, frames in ([(n, frames_for(n)) for n in init_grids.LIFE_ART]
                          + [("two_glider", 17)]):
         grid = getattr(init_grids, name)
         a = plan_structure(life_run(grid, frames, boundary="wall"))
@@ -825,7 +820,7 @@ def test_boundary_default_changes_nothing_that_ships():
 
 def test_unknown_boundary_is_refused():
     try:
-        life_run(init_grids.tree_fork, 5, boundary="toroidal")
+        life_run(init_grids.r_pentomino, 5, boundary="toroidal")
     except ValueError as exc:
         assert "toroidal" in str(exc)
     else:

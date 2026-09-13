@@ -14,18 +14,6 @@ k4grid = np.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]) 
 
-glider = np.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 1, 0, 1, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 1, 1, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]) 
-                   
 bar = np.array([[0, 1, 0],
                    [0, 1, 0],
                    [0, 1, 0]]) 
@@ -75,7 +63,7 @@ nineoscillator = np.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 
 # Two gliders on a collision course.  They meet around step 10 and settle into
 # a "pond" still life by step 15.  This is the array form of
-# initial_sates/twoGlider_pond.png.
+# initial_states/twoGlider_pond.png.
 two_glider = np.zeros((32, 32), dtype=int)
 for _r, _c in [(8, 12),
                (9, 11),
@@ -87,51 +75,137 @@ for _r, _c in [(8, 12),
 del _r, _c
 
 
-# ---------------------------------------------------------------------- trees
+# ------------------------------------------------------- common Life patterns
 #
-# Seeds whose space-time history looks like a tree when printed, since time is
-# the vertical axis.  A cluster that persists makes the trunk; gliders and
-# spaceships leaving it lean outwards as they climb, which is what draws the
-# branches.  Found with tree_search.py over symmetric and random seeds.
+# The standard menagerie, each one a well known object with a documented
+# period and, for the spaceships, a documented displacement.  What each looks
+# like as a print follows from what it does in the plane, because time is the
+# vertical axis:
 #
-# All are sized for 22 generations, which prints about 218mm tall on the
-# 10mm lattice.
+#   still life   an unchanging shape, so a straight prism of that cross section
+#   oscillator   the same shape returning every p generations, so a column
+#                that repeats with a vertical period of p * unit
+#   spaceship    a shape translating steadily, so a leaning column whose angle
+#                is set by how far it moves per generation
+#   methuselah   a small seed that stays chaotic for a long time, so an
+#                irregular, branching mass
+#   gun          a still machine that emits spaceships, so a fixed core with
+#                leaning columns streaming away from it at a regular interval
+#
+# The grid each one is planted in has to be big enough that the pattern never
+# reaches its edge, or it is being clipped and is no longer Life.  Travelling
+# and growing patterns therefore get more room than static ones.
 
-TREE_ART = {
-    # a single trunk that splits cleanly in two.  The smallest seed of the set
-    "tree_fork":     ["#####",
-                      "##.##"],
+LIFE_ART = {
+    # ---- still lifes: unchanging, so a plain vertical prism
+    "block":        ["##",
+                     "##"],
+    "beehive":      [".##.",
+                     "#..#",
+                     ".##."],
+    "loaf":         [".##.",
+                     "#..#",
+                     ".#.#",
+                     "..#."],
+    "boat":         ["##.",
+                     "#.#",
+                     ".#."],
+    "tub":          [".#.",
+                     "#.#",
+                     ".#."],
 
-    # a plain plus sign, which opens into the widest crown of the slim set
-    "tree_cross":    [".#.",
-                      "###",
-                      ".#."],
+    # ---- oscillators: a column repeating with the period of the object
+    "blinker":      ["###"],
+    "toad":         [".###",
+                     "###."],
+    "beacon":       ["##..",
+                     "##..",
+                     "..##",
+                     "..##"],
+    "pulsar":       ["..###...###..",
+                     ".............",
+                     "#....#.#....#",
+                     "#....#.#....#",
+                     "#....#.#....#",
+                     "..###...###..",
+                     ".............",
+                     "..###...###..",
+                     "#....#.#....#",
+                     "#....#.#....#",
+                     "#....#.#....#",
+                     ".............",
+                     "..###...###.."],
+    "pentadecathlon": ["..#....#..",
+                       "##.####.##",
+                       "..#....#.."],
 
-    # a long bare trunk with a late, narrow crown
-    "tree_slender":  ["...#.",
-                      "..#.#",
-                      "#.#..",
-                      "##.#.",
-                      "....#"],
+    # ---- spaceships: a leaning column
+    "glider":       [".#.",
+                     "..#",
+                     "###"],
+    "lwss":         [".####",
+                     "#...#",
+                     "....#",
+                     "#..#."],
+    "mwss":         ["...#..",
+                     ".#...#",
+                     "#.....",
+                     "#....#",
+                     "#####."],
+    "hwss":         ["...##..",
+                     ".#....#",
+                     "#......",
+                     "#.....#",
+                     "######."],
 
-    # a wider, more open crown on a short trunk
-    "tree_crown":    [".###.",
-                      "#...#",
-                      ".#.#.",
-                      "##.##"],
+    # ---- methuselahs: small seeds that stay chaotic for a long time
+    "r_pentomino":  [".##",
+                     "##.",
+                     ".#."],
+    "acorn":        [".#.....",
+                     "...#...",
+                     "##..###"],
+    "diehard":      ["......#.",
+                     "##......",
+                     ".#...###"],
+    "b_heptomino":  ["###.",
+                     ".###",
+                     "..#."],
+    "pi_heptomino": ["###",
+                     "#.#",
+                     "#.#"],
 
-    # the pi heptomino: dense all the way up, a conifer rather than a bare tree
-    "tree_pine":     ["###",
-                      "#.#",
-                      "#.#"],
+    # ---- a gun: a fixed core shedding gliders at a regular interval
+    "gosper_glider_gun": [
+        "........................#...........",
+        "......................#.#...........",
+        "............##......##............##",
+        "...........#...#....##............##",
+        "##........#.....#...##..............",
+        "##........#...#.##....#.#...........",
+        "..........#.....#.......#...........",
+        "...........#...#....................",
+        "............##......................"],
 }
 
-TREE_GRID_SIZE = 49  # room for 22 generations without touching the boundary
+# How much room each one needs to run without touching the edge of its grid.
+# A pattern spreads by at most one cell per generation, so a static object
+# needs almost nothing and a gun needs room for everything it has emitted.
+LIFE_SIZE = {
+    "pulsar": 33, "pentadecathlon": 33,
+    "glider": 49, "lwss": 61, "mwss": 61, "hwss": 61,
+    "r_pentomino": 61, "acorn": 61, "diehard": 49,
+    "b_heptomino": 61, "pi_heptomino": 61,
+    "gosper_glider_gun": 91,
+}
+DEFAULT_GRID_SIZE = 25
 
 
-def from_art(rows, size=TREE_GRID_SIZE):
+def from_art(rows, size=DEFAULT_GRID_SIZE):
     """Turn rows of '#' and '.' into a centred grid of the given size."""
     art = np.array([[1 if c == "#" else 0 for c in row] for row in rows], dtype=int)
+    if size < max(art.shape):
+        size = max(art.shape)
     grid = np.zeros((size, size), dtype=int)
     r0 = size // 2 - art.shape[0] // 2
     c0 = size // 2 - art.shape[1] // 2
@@ -139,8 +213,8 @@ def from_art(rows, size=TREE_GRID_SIZE):
     return grid
 
 
-for _name, _art in TREE_ART.items():
-    globals()[_name] = from_art(_art)
+for _name, _art in LIFE_ART.items():
+    globals()[_name] = from_art(_art, LIFE_SIZE.get(_name, DEFAULT_GRID_SIZE))
 del _name, _art
 
 

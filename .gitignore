@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+*:Zone.Identifier
+
+# Generated models. These run to tens of megabytes each.
 output_stls/*
 !output_stls/.gitkeep
-*:Zone.Identifier
-.ipynb_checkpoints/
+
+# Working files kept locally but not part of the project
+conway3d_stl_rung*.stl
+conway_life_stl_old.ipynb
+model_stls/old/
+initial_states/*.psd

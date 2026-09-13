@@ -6,7 +6,7 @@ side.
 
     python preview.py --pattern two_glider --frames 17 --out preview.png
     python preview.py --array my_pattern.txt --frames 22 --out mine.png
-    python preview.py --seeds trees.npz --frames 22 --out trees.png
+    python preview.py --pattern gosper_glider_gun --frames 40 --out gun.png
 """
 
 import argparse
