@@ -12,6 +12,7 @@ from stl import mesh
 
 import init_grids
 from conway3d_stl import (base_footprint, build_model, check_connectivity,
+                          conway_update, conwayog_rule_mask,
                           cylinder_mesh, life_run, load_building_blocks,
                           load_grid_from_image, make_circular_base, plan_structure,
                           save_stl)
@@ -406,6 +407,130 @@ def test_from_art_round_trips():
     ys, xs = np.nonzero(grid)
     sub = grid[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
     assert np.array_equal(sub, [[1, 0, 1], [0, 1, 0], [1, 0, 1]])
+
+
+# ------------------------------------------------- the rules really are Life
+
+def _art(rows):
+    return np.array([[1 if c == "#" else 0 for c in r] for r in rows], dtype=int)
+
+
+def test_rule_is_exactly_b3_s23():
+    """Every one of the 18 (state, neighbour count) cases, not a sample."""
+    for state in (0, 1):
+        for n in range(9):
+            want = 1 if (n == 3 or (state == 1 and n == 2)) else 0
+            got = conway_update(state, n)
+            assert got == want, (
+                f"state {state} with {n} neighbours gave {got}, Life says {want}")
+
+    assert conwayog_rule_mask.sum() == 8, "neighbourhood is not the 8 around a cell"
+    assert conwayog_rule_mask[1, 1] == 0, "a cell is counted as its own neighbour"
+    assert conwayog_rule_mask.shape == (3, 3)
+
+
+CANONICAL = {
+    # name: (seed, period, displacement per period)
+    "block":   (_art(["##", "##"]), 1, (0, 0)),
+    "beehive": (_art([".##.", "#..#", ".##."]), 1, (0, 0)),
+    "loaf":    (_art([".##.", "#..#", ".#.#", "..#."]), 1, (0, 0)),
+    "boat":    (_art(["##.", "#.#", ".#."]), 1, (0, 0)),
+    "tub":     (_art([".#.", "#.#", ".#."]), 1, (0, 0)),
+    "blinker": (_art(["###"]), 2, (0, 0)),
+    "toad":    (_art([".###", "###."]), 2, (0, 0)),
+    "beacon":  (_art(["##..", "##..", "..##", "..##"]), 2, (0, 0)),
+    "pulsar":  (_art(["..###...###..", ".............",
+                      "#....#.#....#", "#....#.#....#", "#....#.#....#",
+                      "..###...###..", ".............", "..###...###..",
+                      "#....#.#....#", "#....#.#....#", "#....#.#....#",
+                      ".............", "..###...###.."]), 3, (0, 0)),
+    "glider":  (_art([".#.", "..#", "###"]), 4, (1, 1)),
+    "lwss":    (_art([".####", "#...#", "....#", "#..#."]), 4, (0, 2)),
+}
+
+
+def test_canonical_patterns_have_their_known_periods():
+    """Still lifes hold, oscillators return, spaceships move by the right step."""
+    for name, (seed, period, disp) in CANONICAL.items():
+        rec = life_run(np.pad(seed, 20), period * 3 + 1)
+        start = rec[0]
+
+        for k in (1, 2, 3):
+            want = np.roll(np.roll(start, disp[0] * k, axis=0), disp[1] * k, axis=1)
+            assert np.array_equal(rec[period * k], want), (
+                f"{name} is wrong after {period * k} generations")
+
+        for shorter in range(1, period):
+            assert not np.array_equal(rec[shorter], start), (
+                f"{name} repeats at {shorter}, so its period is not {period}")
+
+
+def test_r_pentomino_matches_the_documented_result():
+    """The R-pentomino settles at generation 1103 with 116 cells.
+
+    A long, well documented run catches rule errors too subtle to show up in
+    small patterns.  The field is wide enough that the six escaping gliders
+    never reach the edge, so this is infinite-plane Life.
+    """
+    from tree_search import step   # verified against life_run below
+
+    n = 641
+    g = np.zeros((1, n, n), dtype=np.int8)
+    c = n // 2
+    for r, x in [(0, 1), (0, 2), (1, 0), (1, 1), (2, 1)]:
+        g[0, c + r, c + x] = 1
+
+    for _ in range(1103):
+        g = step(g)
+    assert int(g.sum()) == 116, f"generation 1103 has {int(g.sum())} cells, not 116"
+
+    for _ in range(60):                      # and it stays settled
+        g = step(g)
+        assert int(g.sum()) == 116, "population moved after it should have settled"
+
+    assert not (g[0, :2, :].any() or g[0, -2:, :].any()
+                or g[0, :, :2].any() or g[0, :, -2:].any()), "hit the boundary"
+
+
+def test_fast_simulator_matches_the_pipeline():
+    from tree_search import run_batch
+    for name in ["tree_fork", "tree_pine"]:
+        g = getattr(init_grids, name)
+        a = life_run(g, 22).astype(int)
+        b = run_batch(np.array([g], dtype=np.int8), 22)[0].astype(int)
+        assert np.array_equal(a, b), f"{name}: the two simulators disagree"
+
+
+def test_trees_are_unaffected_by_the_size_of_their_grid():
+    """A pattern touching the edge would be silently clipped and not be Life."""
+    def shapes(rec):
+        out = []
+        for fr in rec:
+            ys, xs = np.nonzero(fr)
+            out.append(tuple(sorted(zip(ys - ys.min(), xs - xs.min()))))
+        return out
+
+    for name, art in init_grids.TREE_ART.items():
+        small = life_run(init_grids.from_art(art, size=49), TREE_FRAMES)
+        big = life_run(init_grids.from_art(art, size=141), TREE_FRAMES)
+        assert shapes(small) == shapes(big), (
+            f"{name} evolves differently on a bigger grid, so it is being clipped")
+
+
+def test_placed_cells_reproduce_the_simulated_history():
+    """The print is a faithful record: one cell part per live cell, nothing else."""
+    for name in init_grids.TREE_ART:
+        rec = life_run(getattr(init_grids, name), TREE_FRAMES)
+        plan = plan_structure(rec)
+
+        h, w = rec.shape[1] + 2, rec.shape[2] + 2
+        back = np.zeros((rec.shape[0], h, w), dtype=int)
+        for x, y, t in plan["cells"]:
+            back[t, x, y] = 1
+        back = back[:, ::-1, :][:, 1:-1, 1:-1]   # undo the flip and the padding
+
+        assert np.array_equal(back, rec.astype(int)), (
+            f"{name}: placed cells do not match the simulation")
 
 
 def _run():
