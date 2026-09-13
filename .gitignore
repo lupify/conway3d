@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+output_stls/*
+!output_stls/.gitkeep
+*:Zone.Identifier
+.ipynb_checkpoints/
