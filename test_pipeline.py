@@ -359,10 +359,16 @@ def test_plan_matches_the_placed_meshes():
 # the same dict, so a pattern that is wrong here is wrong in the models too.
 
 PATTERN_FRAMES = {"gosper_glider_gun": 40, "pentadecathlon": 31}
+# a vanishing pattern is run exactly as long as it lives
+VANISH_FRAMES = {"snowflake": 9, "fuse_diagonal": 10, "pinwheel_web": 11,
+                 "row_of_six": 12, "woven_square": 13, "walled_box": 14,
+                 "ring_of_eight": 15}
 DEFAULT_FRAMES = 22
 
 
 def frames_for(name):
+    if name in VANISH_FRAMES:
+        return VANISH_FRAMES[name]
     return PATTERN_FRAMES.get(name, DEFAULT_FRAMES)
 
 
@@ -374,6 +380,17 @@ KNOWN_BEHAVIOUR = {
     "pulsar": (3, (0, 0)), "pentadecathlon": (15, (0, 0)),
     "glider": (4, (1, 1)), "lwss": (4, (0, 2)),
     "mwss": (4, (0, 2)), "hwss": (4, (0, 2)),
+    # longer than four, so the print repeats only every p layers
+    "octagon2": (5, (0, 0)), "figure_eight": (8, (0, 0)),
+    "kok_galaxy": (8, (0, 0)), "tumbler": (14, (0, 0)),
+}
+
+# Patterns that build up and then vanish completely: the generation at which
+# the last cell dies.  These are the closed forms, beginning and ending at
+# nothing, so the number is what sets the height of the print.
+KNOWN_VANISHING = {
+    "snowflake": 9, "fuse_diagonal": 10, "pinwheel_web": 11, "row_of_six": 12,
+    "woven_square": 13, "walled_box": 14, "ring_of_eight": 15,
 }
 
 # Generation at which the pattern stops changing, and the population there.
@@ -662,15 +679,15 @@ def test_designer_analysis_warns_about_a_clipped_domain():
 
 # ---------------------------------------------------------------- base modes
 
-def _parts(cell_bases):
+def _parts(ground):
     blocks = load_building_blocks(MODEL_DIR)
     rec = life_run(init_grids.r_pentomino, 10)
-    return blocks, rec, build_model(rec, blocks, unit=UNIT, cell_bases=cell_bases)
+    return blocks, rec, build_model(rec, blocks, unit=UNIT, ground=ground)
 
 
 def test_base_modes_place_exactly_the_right_parts():
-    blocks, rec, with_feet = _parts(True)
-    _, _, without = _parts(False)
+    blocks, rec, with_feet = _parts("cells")
+    _, _, without = _parts("none")
 
     n_cells = len(with_feet["cells"])
     n_rungs = len(with_feet["connection_lines"])
@@ -687,7 +704,7 @@ def test_base_modes_place_exactly_the_right_parts():
 
 def test_handheld_model_has_nothing_below_the_cells():
     """With no base at all the lowest point is the underside of a cell."""
-    blocks, _, model = _parts(False)
+    blocks, _, model = _parts("none")
     pts = np.concatenate([m.points.reshape(-1, 3) for m in model["meshes"]])
     cell_bottom = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min())
     assert abs(pts[:, 2].min() - cell_bottom) < 1e-6, (
@@ -697,9 +714,68 @@ def test_handheld_model_has_nothing_below_the_cells():
     assert len(check_connectivity(model)["components"]) == 1
 
 
+def test_start_cell_is_a_closed_solid_that_prints_flat():
+    """The flat footed cell that replaces generation 0 when there is no base."""
+    for version in ["version1", "version2", "version3"]:
+        blocks = load_building_blocks(f"./model_stls/{version}")
+        start, cell = blocks["start"], blocks["cell"]
+        sp = start.points.reshape(-1, 3)
+        cp = cell.points.reshape(-1, 3)
+
+        # it must occupy exactly the z range of an ordinary cell, so that
+        # swapping it in moves nothing else
+        assert abs(sp[:, 2].min() - cp[:, 2].min()) < 1e-6, f"{version}: bottom moved"
+        assert abs(sp[:, 2].max() - cp[:, 2].max()) < 1e-6, f"{version}: top moved"
+
+        # a flat foot exactly one lattice pitch across, so neighbours meet
+        foot = sp[np.isclose(sp[:, 2], sp[:, 2].min(), atol=1e-6)]
+        assert len(foot) > 8, f"{version}: no flat face at the bottom"
+        across = 2 * np.hypot(foot[:, 0], foot[:, 1]).max()
+        assert abs(across - UNIT) < 0.01, (
+            f"{version}: foot is {across:.2f}mm across, expected {UNIT}")
+
+        # closed, and every edge traversed once each way
+        seen = {}
+        for t in start.vectors:
+            for i in range(3):
+                a = tuple(np.round(t[i], 4))
+                b = tuple(np.round(t[(i + 1) % 3], 4))
+                if (b, a) in seen:
+                    seen[(b, a)] -= 1
+                else:
+                    seen[(a, b)] = seen.get((a, b), 0) + 1
+        assert not [v for v in seen.values() if v != 0], (
+            f"{version}: start cell is not a consistently oriented closed surface")
+
+        n = np.cross(start.vectors[:, 1] - start.vectors[:, 0],
+                     start.vectors[:, 2] - start.vectors[:, 0])
+        assert np.abs(n.sum(axis=0)).max() < 1e-2, f"{version}: normals do not cancel"
+
+
+def test_start_ground_swaps_generation_0_and_nothing_else():
+    blocks, _, plain = _parts("none")
+    _, _, started = _parts("start")
+
+    assert len(plain["meshes"]) == len(started["meshes"]), (
+        "start cells replace cells, they are not extra parts")
+    assert plain["cells"] == started["cells"]
+
+    n0 = sum(1 for _, _, t in plain["cells"] if t == 0)
+    n_start = sum(1 for m in started["meshes"]
+                  if len(m.data) == len(blocks["start"].data))
+    assert n_start == n0, f"{n_start} start cells placed, expected {n0}"
+
+    # the model now has a flat bottom instead of meeting the bed at a point
+    sp = np.concatenate([m.points.reshape(-1, 3) for m in started["meshes"]])
+    low = sp[np.isclose(sp[:, 2], sp[:, 2].min(), atol=1e-6)]
+    assert len(low) > 8 * n0, "no flat first layer"
+    pp = np.concatenate([m.points.reshape(-1, 3) for m in plain["meshes"]])
+    assert abs(sp[:, 2].min() - pp[:, 2].min()) < 1e-6, "the model changed height"
+
+
 def test_plate_alone_welds_into_the_generation_0_cells():
     """With no footings the plate has to reach up into the cells itself."""
-    blocks, _, model = _parts(False)
+    blocks, _, model = _parts("none")
     plate, cx, cy, r = make_circular_base(model, blocks, thickness=3.0)
     top = float(plate.points.reshape(-1, 3)[:, 2].max())
 
@@ -713,7 +789,7 @@ def test_plate_alone_welds_into_the_generation_0_cells():
 
 
 def test_a_plate_too_thin_to_reach_the_cells_is_refused():
-    blocks, _, model = _parts(False)
+    blocks, _, model = _parts("none")
     cell_bottom = float(blocks["cell"].points.reshape(-1, 3)[:, 2].min())
     weld = cell_bottom + 0.25
 
@@ -825,6 +901,76 @@ def test_unknown_boundary_is_refused():
         assert "toroidal" in str(exc)
     else:
         raise AssertionError("an unknown boundary should not be accepted")
+
+
+# ------------------------------------------------- patterns that vanish
+
+def test_vanishing_patterns_die_exactly_when_documented():
+    """Each must still be alive the generation before, and empty on the dot."""
+    for name, gen in KNOWN_VANISHING.items():
+        seed = np.pad(init_grids.from_art(init_grids.LIFE_ART[name]), 30)
+        rec = life_run(seed, gen + 3, boundary="wall")
+        assert rec[gen - 1].sum() > 0, f"{name} was already dead before generation {gen}"
+        assert rec[gen].sum() == 0, (
+            f"{name} still has {int(rec[gen].sum())} cells at generation {gen}")
+
+
+def test_vanishing_patterns_make_a_model_that_closes_at_the_top():
+    """Run for exactly its lifetime, the top layer is the last living one."""
+    for name, gen in KNOWN_VANISHING.items():
+        grid = getattr(init_grids, name)
+        rec = life_run(grid, gen)
+        assert rec[-1].sum() > 0, f"{name}: the last frame should still be alive"
+        plan = plan_structure(rec)
+        assert plan["cells"], f"{name}: nothing to build"
+        top = max(t for _, _, t in plan["cells"])
+        assert top == gen - 1, f"{name}: top layer is {top}, expected {gen - 1}"
+
+
+def test_long_period_oscillators_repeat_and_not_sooner():
+    """Above period four the column repeats only every p layers."""
+    for name in ["octagon2", "figure_eight", "kok_galaxy", "tumbler",
+                 "pentadecathlon"]:
+        period = KNOWN_BEHAVIOUR[name][0]
+        assert period > 4, f"{name} is not a long period oscillator"
+        seed = np.pad(init_grids.from_art(init_grids.LIFE_ART[name]), 25)
+        rec = life_run(seed, period + 1, boundary="wall")
+        assert np.array_equal(rec[period], rec[0]), f"{name} did not return at {period}"
+        for shorter in range(1, period):
+            assert not np.array_equal(rec[shorter], rec[0]), (
+                f"{name} repeats at {shorter}, so its period is not {period}")
+
+
+def _canonical(sub):
+    """Smallest of the eight rotations and reflections of a cropped pattern."""
+    best = None
+    for k in range(4):
+        r = np.rot90(sub, k)
+        for m in (r, r[:, ::-1]):
+            key = (m.shape, m.astype(np.int8).tobytes())
+            if best is None or key < best:
+                best = key
+    return best
+
+
+def test_the_named_patterns_are_all_distinct_objects():
+    """No two names may be one object caught at different times or angles.
+
+    A pattern one generation into another's run is not a new pattern, and
+    neither is the same thing rotated, so both are compared away.
+    """
+    seen = {}
+    for name in init_grids.LIFE_ART:
+        rec = life_run(getattr(init_grids, name), 18, boundary="wall")
+        phases = set()
+        for fr in rec:
+            ys, xs = np.nonzero(fr)
+            if len(ys) == 0:
+                continue
+            phases.add(_canonical(fr[ys.min():ys.max() + 1, xs.min():xs.max() + 1]))
+        for other, theirs in seen.items():
+            assert not (phases & theirs), f"{name} and {other} are the same object"
+        seen[name] = phases
 
 
 def _run():

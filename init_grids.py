@@ -91,6 +91,8 @@ del _r, _c
 #                irregular, branching mass
 #   gun          a still machine that emits spaceships, so a fixed core with
 #                leaning columns streaming away from it at a regular interval
+#   vanishing    a seed that builds up and then dies out entirely, so a closed
+#                form that begins and ends at nothing
 #
 # The grid each one is planted in has to be big enough that the pattern never
 # reaches its edge, or it is being clipped and is no longer Life.  Travelling
@@ -186,6 +188,77 @@ LIFE_ART = {
         "..........#.....#.......#...........",
         "...........#...#....................",
         "............##......................"],
+
+    # ---- oscillators with a period longer than four, so the print repeats
+    #      only every p layers rather than every other one
+    "octagon2":     ["...##...",
+                     "..#..#..",
+                     ".#....#.",
+                     "#......#",
+                     "#......#",
+                     ".#....#.",
+                     "..#..#..",
+                     "...##..."],
+    "figure_eight": ["###...",
+                     "###...",
+                     "###...",
+                     "...###",
+                     "...###",
+                     "...###"],
+    "kok_galaxy":   ["##.######",
+                     "##.######",
+                     "##.......",
+                     "##.....##",
+                     "##.....##",
+                     "##.....##",
+                     ".......##",
+                     "######.##",
+                     "######.##"],
+    "tumbler":      [".#.....#.",
+                     "#.#...#.#",
+                     "#..#.#..#",
+                     "..#...#..",
+                     "..##.##.."],
+
+    # ---- simple setups that build up and then vanish completely, so the print
+    #      is a closed form that starts and ends at nothing.  The diagonal is
+    #      the classic fuse and the row of six is the smallest of these; the
+    #      rest were found by sweeping small symmetric seeds, and are named for
+    #      their shape rather than after any established object
+    "fuse_diagonal": ["." * i + "#" + "." * (19 - i) for i in range(20)],
+    "snowflake":    ["..###..",
+                     "...#...",
+                     "#..#..#",
+                     "###.###",
+                     "#..#..#",
+                     "...#...",
+                     "..###.."],
+    "row_of_six":   ["######"],
+    "pinwheel_web": ["#....#",
+                     "##..##",
+                     ".#..#.",
+                     "##..##",
+                     "#....#"],
+    "woven_square": ["###.###",
+                     "##.#.##",
+                     "#..#..#",
+                     ".##.##.",
+                     "#..#..#",
+                     "##.#.##",
+                     "###.###"],
+    "walled_box":   ["#######",
+                     "##...##",
+                     "#.###.#",
+                     "#.#.#.#",
+                     "#.###.#",
+                     "##...##",
+                     "#######"],
+    "ring_of_eight": ["..##..",
+                      ".#..#.",
+                      "##..##",
+                      "##..##",
+                      ".#..#.",
+                      "..##.."],
 }
 
 # How much room each one needs to run without touching the edge of its grid.
@@ -193,6 +266,10 @@ LIFE_ART = {
 # needs almost nothing and a gun needs room for everything it has emitted.
 LIFE_SIZE = {
     "pulsar": 33, "pentadecathlon": 33,
+    "octagon2": 25, "figure_eight": 25, "kok_galaxy": 27, "tumbler": 25,
+    "fuse_diagonal": 33, "snowflake": 25, "row_of_six": 25,
+    "pinwheel_web": 25, "woven_square": 25, "walled_box": 25,
+    "ring_of_eight": 25,
     "glider": 49, "lwss": 61, "mwss": 61, "hwss": 61,
     "r_pentomino": 61, "acorn": 61, "diehard": 49,
     "b_heptomino": 61, "pi_heptomino": 61,

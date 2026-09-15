@@ -130,7 +130,7 @@ REGION_CHECK = [[1, 0], [1, 1], [0, 1], [-1, 1],
                 [-1, 0], [-1, -1], [0, -1], [1, -1]]
 
 
-def load_building_blocks(model_stl_dir="./model_stls/version3"):
+def load_building_blocks(model_stl_dir="./model_stls/version3", unit=10):
     """Load the four part STLs and orient them for placement."""
     rungstl_adj = mesh.Mesh.from_file(f"{model_stl_dir}/rung_adj.stl")
     rungstl_crn = mesh.Mesh.from_file(f"{model_stl_dir}/rung_diag.stl")
@@ -143,7 +143,8 @@ def load_building_blocks(model_stl_dir="./model_stls/version3"):
     cellbasestl.z -= 4  # the base cell center is at positive 4mm
 
     return {"rung_adj": rungstl_adj, "rung_crn": rungstl_crn,
-            "base": cellbasestl, "cell": cellstl}
+            "base": cellbasestl, "cell": cellstl,
+            "start": make_start_cell(cellstl, foot_radius=unit / 2)}
 
 
 def plan_structure(grid_record, verbose=False):
@@ -186,23 +187,27 @@ def plan_structure(grid_record, verbose=False):
     return {"cells": cells, "rungs": rungs, "connection_lines": connection_lines}
 
 
-def build_model(grid_record, blocks, unit=10, verbose=False, cell_bases=True):
+def build_model(grid_record, blocks, unit=10, verbose=False, ground="cells"):
     """Place a part mesh for every cell and every cell-to-cell link.
 
-    cell_bases adds the square footing under each cell of generation 0.  Leave
-    it off for a model meant to be held rather than stood up.
+    ground says what generation 0 stands on: "cells" puts the square footing
+    under each of them, "start" swaps them for the flat footed start cell, and
+    "none" leaves them as ordinary cells with nothing underneath.
     """
+    if ground not in ("cells", "start", "none"):
+        raise ValueError(f"ground must be cells, start or none, not {ground!r}")
     plan = plan_structure(grid_record, verbose=verbose)
     meshes = []
 
     for (x, y, t) in plan["cells"]:
-        m = mesh.Mesh(np.copy(blocks["cell"].data))  # mesh for each live cell
+        part = "start" if (t == 0 and ground == "start") else "cell"
+        m = mesh.Mesh(np.copy(blocks[part].data))  # mesh for each live cell
         m.x += x * unit
         m.y += y * unit
         m.z += t * unit
         meshes.append(mesh.Mesh(np.copy(m.data)))
 
-        if t == 0 and cell_bases:  # adding the base for printing
+        if t == 0 and ground == "cells":  # adding the base for printing
             m = mesh.Mesh(np.copy(blocks["base"].data))
             m.x += x * unit
             m.y += y * unit
@@ -218,7 +223,7 @@ def build_model(grid_record, blocks, unit=10, verbose=False, cell_bases=True):
 
     return {"meshes": meshes, "cells": plan["cells"],
             "connection_lines": plan["connection_lines"], "unit": unit,
-            "cell_bases": cell_bases}
+            "ground": ground}
 
 
 def check_connectivity(model):
@@ -261,6 +266,115 @@ def save_stl(meshes, path, ascii_mode=True):
     combined = mesh.Mesh(np.concatenate([m.data for m in meshes]))
     combined.save(path, mode=stl.Mode.ASCII if ascii_mode else stl.Mode.BINARY)
     return combined
+
+
+# --------------------------------------------------- the generation 0 cell
+
+RIM_SNAP = 4   # decimals; the part STLs are only clean to about this
+
+
+def _rim_key(v):
+    return (round(float(v[0]), RIM_SNAP), round(float(v[1]), RIM_SNAP),
+            round(float(v[2]), RIM_SNAP))
+
+
+def clip_above(vectors, z=0.0):
+    """Keep the part of a triangle soup at or above a plane, splitting straddlers."""
+    out = []
+    for tri in vectors:
+        poly = []
+        for i in range(3):
+            a, b = tri[i], tri[(i + 1) % 3]
+            if a[2] >= z - 1e-9:
+                poly.append(a)
+            if (a[2] - z) * (b[2] - z) < 0:
+                poly.append(a + (z - a[2]) / (b[2] - a[2]) * (b - a))
+        if len(poly) >= 3:
+            p = np.array(poly)
+            for i in range(1, len(p) - 1):
+                out.append([p[0], p[i], p[i + 1]])
+    return np.array(out)
+
+
+def rim_loop(tris, z=0.0):
+    """The open boundary left by clipping, ordered into one loop."""
+    count, store = {}, {}
+    for t in tris:
+        for i in range(3):
+            a, b = _rim_key(t[i]), _rim_key(t[(i + 1) % 3])
+            if a == b:
+                continue
+            e = tuple(sorted([a, b]))
+            count[e] = count.get(e, 0) + 1
+            store[e] = (a, b)
+    rim = [store[e] for e, c in count.items() if c == 1]
+    if not rim:
+        raise ValueError("clipping left no open rim")
+    stray = [e for e in rim if abs(e[0][2] - z) > 1e-3 or abs(e[1][2] - z) > 1e-3]
+    if stray:
+        raise ValueError(f"{len(stray)} open edges away from the cut plane; "
+                         f"the part is not watertight enough to cut")
+    nbr = {}
+    for a, b in rim:
+        nbr.setdefault(a, set()).add(b)
+        nbr.setdefault(b, set()).add(a)
+    if any(len(v) != 2 for v in nbr.values()):
+        raise ValueError("the cut boundary is not a simple loop")
+    start = rim[0][0]
+    loop, prev, cur = [start], None, start
+    while True:
+        a, b = tuple(nbr[cur])
+        step = a if a != prev else b
+        if step == start:
+            break
+        loop.append(step)
+        prev, cur = cur, step
+    if len(loop) != len(nbr):
+        raise ValueError("the cut boundary has more than one loop")
+    return np.array(loop, dtype=float)
+
+
+def _skirted(top, loop, zbot, k, reverse):
+    lp = loop[::-1] if reverse else loop
+    n, cen = len(lp), np.array([0.0, 0.0, zbot])
+    tris = list(top)
+    for i in range(n):
+        a, b = lp[i], lp[(i + 1) % n]
+        a2 = np.array([a[0] * k, a[1] * k, zbot])
+        b2 = np.array([b[0] * k, b[1] * k, zbot])
+        tris += [[a, b, b2], [a, b2, a2], [cen, a2, b2]]
+    data = np.zeros(len(tris), dtype=mesh.Mesh.dtype)
+    data["vectors"] = np.array(tris)
+    m = mesh.Mesh(data)
+    m.update_normals()
+    return m
+
+
+def make_start_cell(cell, foot_radius=5.0):
+    """A cell for generation 0 that can be printed without anything under it.
+
+    The lower half of a cell narrows to a point, which cannot start a print.
+    This keeps the upper half and replaces the lower half with a skirt flaring
+    out to a flat foot on the build plate, the same idea as the cell_base part
+    in model_stls/old.  The foot is one lattice pitch across by default, so
+    neighbouring cells of generation 0 meet without overlapping, and the part
+    occupies exactly the z range of an ordinary cell, so nothing else moves.
+    """
+    v = cell.vectors
+    zbot = float(v.reshape(-1, 3)[:, 2].min())
+    top = clip_above(v, 0.0)
+    loop = rim_loop(top, 0.0)
+    k = foot_radius / float(np.hypot(loop[:, 0], loop[:, 1]).max())
+    import warnings
+    m = _skirted(top, loop, zbot, k, reverse=False)
+    with warnings.catch_warnings():
+        # numpy-stl's closed check is a loose tolerance on the normal sum and
+        # trips on this mesh; the rim pairing is verified in the test suite
+        warnings.simplefilter("ignore")
+        flipped = m.get_mass_properties()[0] < 0
+    if flipped:                             # keep the normals pointing outwards
+        m = _skirted(top, loop, zbot, k, reverse=True)
+    return m
 
 
 # ------------------------------------------------------------- circular base
@@ -405,12 +519,14 @@ def main(argv=None):
                    help="write a binary STL instead of ASCII")
     p.add_argument("--center", action="store_true",
                    help="move the model over the origin, ready to slice")
-    p.add_argument("--base", choices=["cells", "none", "plate", "both"],
+    p.add_argument("--base", choices=["cells", "start", "none", "plate", "both"],
                    default="cells",
                    help="what goes underneath: 'cells' a square footing under "
-                        "each cell of generation 0 (default); 'none' nothing, "
-                        "for a piece to hold in the hand; 'plate' a round plate "
-                        "only; 'both' footings and plate")
+                        "each cell of generation 0 (default); 'start' swaps "
+                        "those cells for the flat footed start cell so the "
+                        "model prints with no base at all; 'none' nothing, not "
+                        "printable as it stands; 'plate' a round plate only; "
+                        "'both' footings and plate")
     p.add_argument("--base-radius", type=float, default=None,
                    help="plate radius in mm (default: cover the whole model)")
     p.add_argument("--base-thickness", type=float, default=3.0,
@@ -444,7 +560,8 @@ def main(argv=None):
     grid_record = life_run(grid, args.frames, boundary=args.boundary)
     blocks = load_building_blocks(args.model_stls)
     model = build_model(grid_record, blocks, unit=args.unit, verbose=args.verbose,
-                        cell_bases=args.base in ("cells", "both"))
+                        ground={"cells": "cells", "both": "cells",
+                                "start": "start"}.get(args.base, "none"))
 
     conn = check_connectivity(model)
 
@@ -499,6 +616,9 @@ def main(argv=None):
     elif args.base == "cells":
         n = sum(1 for _, _, t in model["cells"] if t == 0)
         print(f"base: {n} square footings under generation 0")
+    elif args.base == "start":
+        n = sum(1 for _, _, t in model["cells"] if t == 0)
+        print(f"base: none, generation 0 uses {n} flat footed start cells")
     else:
         print("base: none, the model is meant to be held rather than stood up")
         if len(conn["components"]) > 1:

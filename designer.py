@@ -180,7 +180,8 @@ class Designer(tk.Tk):
         self.v_base = tk.StringVar(value="cells")
         base_box = ttk.Combobox(side, width=9, state="readonly",
                                 textvariable=self.v_base,
-                                values=["cells", "none", "plate", "both"])
+                                values=["cells", "start", "none", "plate",
+                                        "both"])
         base_box.grid(row=2, column=1, sticky="e", pady=(4, 0))
         base_box.bind("<<ComboboxSelected>>", lambda e: self._analyse_later())
 
@@ -375,7 +376,8 @@ class Designer(tk.Tk):
             blocks = load_building_blocks(f"./model_stls/{version}")
             model = build_model(life_run(grid, frames, boundary=boundary),
                                 blocks, unit=10,
-                                cell_bases=base_mode in ("cells", "both"))
+                                ground={"cells": "cells", "both": "cells",
+                                        "start": "start"}.get(base_mode, "none"))
             meshes = list(model["meshes"])
             if base_mode in ("plate", "both"):
                 weld = None
@@ -454,6 +456,8 @@ class Designer(tk.Tk):
             lines.insert(-1, f"plate:  {a['plate']:.0f} mm across")
         if self.v_base.get() in ("cells", "both"):
             lines.insert(-1, f"footings: {a['footings']}")
+        if self.v_base.get() == "start":
+            lines.insert(-1, f"start cells: {a['footings']}")
         warn = []
         if a["clipped"]:
             warn.append(f"The wall is cutting this pattern off, losing "
@@ -466,8 +470,8 @@ class Designer(tk.Tk):
             warn.append(f"{a['pieces']} separate pieces. Setting base to "
                         "'plate' or 'both' would join them into one.")
         if mode == "none":
-            warn.append("No base: nothing holds this on the build plate, so it "
-                        "is meant to be held rather than stood up.")
+            warn.append("Nothing under generation 0, so the cells meet the bed "
+                        "at a point. Use 'start' for a flat footed first layer.")
         if warn:
             lines += ["", "— " + "\n— ".join(warn)]
         self._show_info("\n".join(lines))

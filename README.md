@@ -34,9 +34,15 @@ parts, one for an orthogonal step and a longer one for a diagonal step.
 | `--base` | what you get |
 |---|---|
 | `cells` | a square footing under each generation 0 cell. The default, and what the original project did |
-| `none` | nothing. Cells and rungs only, for a piece to turn over in your hand |
+| `start` | generation 0 is built from the start cell instead: the same cell with its lower half replaced by a skirt flaring to a flat foot one lattice pitch across. No footing, no plate, and it still prints |
+| `none` | nothing. Cells and rungs only, which meets the bed at a point and will not print as it stands |
 | `plate` | a round plate and no footings |
 | `both` | footings and plate |
+
+`start` is the one to use for a piece to turn over in the hand. It is the same
+idea as the cell_base part in `model_stls/old`, but built at load time from
+whichever `cell.stl` is in use, so it matches every part set and occupies
+exactly the z range of an ordinary cell. Nothing else in the model moves.
 | `--boundary` | behaviour |
 |---|---|
 | `grow` | the grid is enlarged as far as the run could need, so the pattern spreads freely and the result is Life on an unbounded plane. The default |
@@ -102,7 +108,17 @@ plane decides what it looks like as a print:
 - a **methuselah** stays chaotic for a long time from a tiny seed, so it prints
   as an irregular branching mass;
 - a **gun** is a fixed machine that emits spaceships, so it prints as a still
-  core with leaning columns streaming away from it at a regular interval.
+  core with leaning columns streaming away from it at a regular interval;
+- a **vanishing** seed builds up and then dies out completely, so it prints as
+  a closed form that begins and ends at nothing.
+
+The oscillators above period four are the ones worth printing as oscillators,
+since a p2 column just alternates. Their frame count is one full cycle plus the
+layer that closes it, capped at 15. The vanishing seeds are run for exactly
+their lifetime, so the top layer is the last living generation. `fuse_diagonal`
+is the classic burning fuse and `row_of_six` the smallest of them; the other
+five were found by sweeping small symmetric seeds and are named for their shape
+rather than after any established object.
 
 | pattern | kind | behaviour | frames | cells | rungs | prints as |
 |---|---|---|---|---|---|---|
@@ -126,6 +142,17 @@ plane decides what it looks like as a print:
 | `b_heptomino` | methuselah | 148 gens | 22 | 356 | 961 | one piece |
 | `pi_heptomino` | methuselah | 173 gens | 22 | 609 | 1636 | one piece |
 | `gosper_glider_gun` | gun | 1 glider / 30 | 40 | 1981 | 5365 | 2 pieces, needs a plate |
+| `octagon2` | oscillator | p5 | 6 | 120 | 288 | one piece |
+| `figure_eight` | oscillator | p8 | 9 | 160 | 392 | one piece |
+| `kok_galaxy` | oscillator | p8 | 9 | 376 | 888 | one piece |
+| `tumbler` | oscillator | p14 | 15 | 268 | 664 | 2 pieces, needs a plate |
+| `snowflake` | vanishing | dies at 9 | 9 | 248 | 620 | one piece |
+| `fuse_diagonal` | vanishing | dies at 10 | 10 | 110 | 180 | 2 pieces, needs a plate |
+| `pinwheel_web` | vanishing | dies at 11 | 11 | 232 | 608 | one piece |
+| `row_of_six` | vanishing | dies at 12 | 12 | 126 | 318 | one piece |
+| `woven_square` | vanishing | dies at 13 | 13 | 332 | 792 | one piece |
+| `walled_box` | vanishing | dies at 14 | 14 | 716 | 1872 | 5 pieces, needs a plate |
+| `ring_of_eight` | vanishing | dies at 15 | 15 | 280 | 708 | one piece |
 
 Counts are for `model_stls/version3` at the frame count shown. Where a pattern
 comes out in several pieces it is because the cells fall into sub-lattices that
@@ -134,9 +161,12 @@ a spaceship leaves its old position behind. Every one of them still reaches the
 build plate, so `--base plate` or `--base both` joins them into a single print;
 none of them float.
 
-Period and displacement for every one of these, and the settling generation and
-population for the methuselahs, are asserted in `test_pipeline.py` against the
-documented values, so a pattern that is wrong here fails the suite.
+Period and displacement for every one of these, the settling generation and
+population for the methuselahs, and the exact generation each vanishing seed
+dies, are all asserted in `test_pipeline.py`, so a pattern that is wrong here
+fails the suite. One test also proves no two names are the same object caught
+at a different generation or turned round, which is easier to do by accident
+than it sounds.
 
 ## Drawing your own
 
